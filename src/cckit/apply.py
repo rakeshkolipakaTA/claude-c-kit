@@ -21,7 +21,7 @@ from . import config, render
 MANIFEST = ".cckit/manifest.json"
 SETTINGS = ".claude/settings.json"
 CLAUDE_MD = "CLAUDE.md"
-EXECUTABLE = {render.TRIM_SCRIPT, render.STATUS_SCRIPT, render.COMPACT_SCRIPT}
+EXECUTABLE = {render.TRIM_SCRIPT, render.STATUS_SCRIPT, render.COMPACT_SCRIPT, render.LOG_SCRIPT, render.REPORT_SCRIPT}
 
 
 def sha(text: str) -> str:
@@ -52,6 +52,11 @@ def desired_files(cfg: dict) -> dict[str, str]:
         files[render.STATUS_SCRIPT] = render.render_statusline_script(cfg)
     if config.telemetry_active(cfg):
         files[render.COMPACT_SCRIPT] = render.render_compact_script(cfg)
+    if cfg["usage"]["log"]:
+        files[render.LOG_SCRIPT] = render.render_log_script(cfg)
+    if cfg["usage"]["scripts"]:
+        files[render.REPORT_SCRIPT] = render.render_report_script(cfg)
+        files[render.USAGE_COMMAND] = render.build_usage_command()
     return files
 
 
@@ -75,6 +80,11 @@ def merge_settings(existing: dict, desired: dict, prev: dict, force: bool) -> tu
     for k, v in (prev.get("env") or {}).items():
         if isinstance(s.get("env"), dict) and s["env"].get(k) == v:
             del s["env"][k]
+    allow_prev = set(prev.get("allow") or [])
+    if allow_prev and isinstance(s.get("permissions"), dict) and isinstance(s["permissions"].get("allow"), list):
+        s["permissions"]["allow"] = [a for a in s["permissions"]["allow"] if a not in allow_prev]
+        if not s["permissions"]["allow"]:
+            del s["permissions"]["allow"]
     deny_prev = set(prev.get("deny") or [])
     if deny_prev and isinstance(s.get("permissions"), dict) and isinstance(s["permissions"].get("deny"), list):
         s["permissions"]["deny"] = [d for d in s["permissions"]["deny"] if d not in deny_prev]
@@ -90,7 +100,7 @@ def merge_settings(existing: dict, desired: dict, prev: dict, force: bool) -> tu
         if not s["hooks"]:
             del s["hooks"]
 
-    owned: dict = {"env": {}, "deny": [], "scalars": {}, "hooks": []}
+    owned: dict = {"env": {}, "deny": [], "allow": [], "scalars": {}, "hooks": []}
 
     # 2. scalar keys
     for k in ("model", "effortLevel", "statusLine"):
@@ -125,6 +135,13 @@ def merge_settings(existing: dict, desired: dict, prev: dict, force: bool) -> tu
             deny.append(rule)
             owned["deny"].append(rule)
 
+    want_allow = desired["permissions"].get("allow") or []
+    if want_allow:
+        allow = perms.setdefault("allow", [])
+        for rule in want_allow:
+            if rule not in allow:
+                allow.append(rule)
+                owned["allow"].append(rule)
     if not deny:
         del perms["deny"]
     if not perms:
@@ -208,6 +225,20 @@ def init(root: Path, force: bool = False, dry_run: bool = False) -> Result:
         res.add("merged", CLAUDE_MD, "managed block only; your text is kept")
     if old != new and not dry_run:
         _write(cm, new)
+
+    # .gitignore: keep the local usage log out of git (only the marked block is ours)
+    gi = root / ".gitignore"
+    old_gi = gi.read_text(encoding="utf-8") if gi.exists() else None
+    new_gi = render.upsert_gitignore(old_gi, render.build_gitignore_block(cfg))
+    if new_gi != old_gi and not (new_gi is None and old_gi is None):
+        res.add("created" if old_gi is None else "merged", ".gitignore", "managed block only" if old_gi is not None else "")
+        if not dry_run:
+            if new_gi:
+                _write(gi, new_gi)
+            elif gi.exists():
+                gi.unlink()
+    elif old_gi is not None or new_gi is not None:
+        res.add("unchanged", ".gitignore")
 
     # settings.json
     sp = root / SETTINGS

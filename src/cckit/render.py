@@ -8,8 +8,13 @@ from . import config
 
 MARK_BEGIN = "<!-- cckit:begin - managed by cckit. Edit cckit.toml and run `cckit init`; text between the markers is rewritten -->"
 MARK_END = "<!-- cckit:end -->"
-HOOK_MARKERS = ("trim_output.py", "compact_report.py")      # identify the hook entries cckit owns inside settings.json
+HOOK_MARKERS = ("trim_output.py", "compact_report.py", "log_token_usage.py")      # identify the hook entries cckit owns inside settings.json
 COMPACT_SCRIPT = ".claude/hooks/compact_report.py"
+LOG_SCRIPT = ".claude/hooks/log_token_usage.py"
+REPORT_SCRIPT = ".claude/scripts/usage_report.py"
+USAGE_COMMAND = ".claude/commands/usage.md"
+GITIGNORE_BEGIN = "# cckit:begin - managed by cckit (local usage log); edit cckit.toml and run `cckit init`"
+GITIGNORE_END = "# cckit:end"
 STATUS_SCRIPT = ".claude/hooks/statusline.py"
 TRIM_SCRIPT = ".claude/hooks/trim_output.py"
 
@@ -67,6 +72,17 @@ def compact_hook_entry(cfg: dict) -> dict:
     return entry
 
 
+def build_allow(cfg: dict) -> list[str]:
+    """Claude may run the usage report without asking: it only reads local transcripts and prints numbers."""
+    return [f"Bash(python3 {REPORT_SCRIPT}:*)".replace("python3", cfg["hooks"]["python"])] if cfg["usage"]["scripts"] else []
+
+
+def log_hook_entry(cfg: dict) -> dict:
+    """Stop / SubagentStop: append token counts to the local CSV. Synchronous on purpose: a background hook is killed when a headless run
+    (`claude -p`, the SDK) exits right after the last response, and this one only reads the new transcript lines (milliseconds). Prints nothing."""
+    return {"hooks": [{"type": "command", "command": cfg["hooks"]["python"], "args": ["${CLAUDE_PROJECT_DIR}/" + LOG_SCRIPT], "timeout": 20}]}
+
+
 def session_hook_entry(cfg: dict) -> dict:
     """Runs when a session starts: registers the developer once (company e-mail from git) or asks Claude to ask. Synchronous, because
     it may hand a sentence to Claude; it exits at once when this machine is already registered."""
@@ -78,9 +94,14 @@ def build_settings(cfg: dict) -> dict:
     """The part of .claude/settings.json that cckit owns."""
     out: dict = {"model": cfg["model"]["default"], "effortLevel": cfg["model"]["effort"], "env": build_env(cfg),
                  "permissions": {"deny": build_deny(cfg)}}
+    if cfg["usage"]["scripts"]:
+        out["permissions"]["allow"] = build_allow(cfg)
     hooks: dict = {}
     if cfg["hooks"]["trim_test_output"]:
         hooks["PreToolUse"] = [hook_entry(cfg)]
+    if cfg["usage"]["log"]:
+        hooks["Stop"] = [log_hook_entry(cfg)]
+        hooks["SubagentStop"] = [log_hook_entry(cfg)]
     if config.telemetry_active(cfg):
         hooks["PreCompact"] = [compact_hook_entry(cfg)]
         if cfg["telemetry"]["auto_register"]:
@@ -104,6 +125,53 @@ def is_cckit_hook(entry: dict) -> bool:
 # ----------------------------------------------------------------------------- hook scripts
 def render_trim_script(cfg: dict) -> str:
     return asset("trim_output.py.tpl").replace("__TAIL_LINES__", str(cfg["hooks"]["tail_lines"]))
+
+
+def render_log_script(cfg: dict) -> str:
+    return asset("log_token_usage.py.tpl").replace("__CSV_PATH__", json.dumps(cfg["usage"]["csv_path"].replace("\\", "/")))
+
+
+def clean_prices(cfg: dict) -> dict:
+    out = {}
+    for word, p in (cfg.get("prices") or {}).items():
+        if isinstance(p, dict):
+            out[str(word)] = {k: float(p[k]) for k in ("input", "output", "cache_read", "cache_write") if isinstance(p.get(k), (int, float)) and not isinstance(p.get(k), bool)}
+    return out
+
+
+def render_report_script(cfg: dict) -> str:
+    return (asset("usage_report.py.tpl").replace("__PRICES__", json.dumps(clean_prices(cfg), indent=None))
+            .replace("__WINDOW__", str(cfg["context"]["auto_compact_window"])).replace("__WARN_PCT__", str(cfg["monitoring"]["warn_context_pct"])))
+
+
+def build_usage_command() -> str:
+    return asset("usage_command.md")
+
+
+def build_gitignore_block(cfg: dict) -> str | None:
+    """Lines that keep the local usage log out of git (None when logging is off)."""
+    if not cfg["usage"]["log"]:
+        return None
+    p = cfg["usage"]["csv_path"].replace("\\", "/")
+    p = p[2:] if p.startswith("./") else p
+    return f"{GITIGNORE_BEGIN}\n/{p}\n/{p}.state.json\n{GITIGNORE_END}\n"
+
+
+def upsert_gitignore(existing: str | None, block: str | None) -> str | None:
+    """Insert, replace or (block=None) remove the managed block of .gitignore; everything outside the markers is kept. None = nothing to write."""
+    text = existing or ""
+    b, e = text.find("# cckit:begin"), text.find(GITIGNORE_END)
+    has = b != -1 and e != -1 and e > b
+    if block is None:
+        if not has:
+            return existing
+        after = text[e + len(GITIGNORE_END):].lstrip("\n")
+        return (text[:b].rstrip("\n") + ("\n" if text[:b].strip() else "") + after) or None
+    if has:
+        after = text[e + len(GITIGNORE_END):].lstrip("\n")
+        return text[:b] + block + ("\n" + after if after else "")
+    sep = "" if not text or text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+    return text + sep + block
 
 
 def render_compact_script(cfg: dict) -> str:
@@ -136,7 +204,11 @@ def build_claude_md_block(cfg: dict) -> str:
 - Run only the tests that cover the change. Run the full suite once, at the end.
 - If an approach fails twice, stop and ask instead of trying a third variation.
 - Between unrelated tasks run `/clear`. At a natural break in a long task run `/compact`.
-
+"""
+    if cfg["usage"]["scripts"]:
+        body += f"""- For tokens, cost or context used so far, run `{cfg["hooks"]["python"]} {REPORT_SCRIPT}` (add `--session all --days 7` for the week). Do not estimate them yourself.
+"""
+    body += """
 # Compact instructions
 When compacting, keep: the goal of the task, decisions made and why, files changed, failing tests with their error lines,
 and open questions. Drop: tool output, exploration dead ends, and full file contents.
@@ -297,7 +369,8 @@ Generated by `cckit init` from `cckit.toml` (claude-cost-kit). Do not edit the g
 | `.claude/settings.json` | model, effort, compaction, subagent limits, tool search, hooks, status line, read blocks |
 | `CLAUDE.md` | short working agreements between the `cckit` markers (your own text outside them is kept) |
 | `.claude/agents/` | cheap, limited subagents: explorer, test-runner, reviewer |
-| `.claude/hooks/` | `trim_output.py` (shortens test output), `statusline.py`, and `compact_report.py` (only with `[telemetry]` on: registers the developer (company e-mail from git) and reports each compaction to the team usage API) |
+| `.claude/hooks/` | `trim_output.py` (shortens test output), `statusline.py`, `log_token_usage.py` (appends each response's token counts to `.claude/token_usage.csv`, git-ignored), and `compact_report.py` (only with `[telemetry]` on: registers the developer (company e-mail from git) and reports each compaction to the team usage API) |
+| `.claude/scripts/`, `.claude/commands/` | `usage_report.py` and `/usage`: session usage and estimated cost, which Claude or you can run |
 | `.claude/rules/` | path-scoped rules, loaded only when Claude touches matching files |
 | `mcp-profiles/` | MCP server sets for `cckit run --profile NAME` |
 | `managed-settings.example.json` | for an administrator: OpenTelemetry and model limits (not enforceable from a repo file) |

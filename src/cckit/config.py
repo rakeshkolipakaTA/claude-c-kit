@@ -71,6 +71,11 @@ warn_context_pct = 60         # the status line turns into a "/compact or /clear
 otel_endpoint = ""            # set to your collector (for example http://collector.example.com:4317) to get OpenTelemetry
                               # settings in .cckit/managed-settings.example.json (they are IGNORED in a repo settings file)
 
+[usage]
+log = true                    # a Stop hook appends the token counts of every response to csv_path (numbers only; local; git-ignored)
+csv_path = ".claude/token_usage.csv"
+scripts = true                # install usage_report.py and the /usage command: Claude or you can run them for session usage and estimated cost
+
 [telemetry]                   # report every context compaction to the team usage app (`cckit server export-app` writes it; see `cckit register`)
 enabled = false
 endpoint = ""                 # base URL of the usage app. Then register is <endpoint>?api=register and usage is <endpoint>?api=usage.
@@ -95,7 +100,8 @@ max_effort_level = "high"
 # type = "http"
 # url = "https://example.com/mcp"
 
-# Optional: price per million tokens, so `cckit report` can estimate cost. Match by a word in the model name.
+# Optional: price per million tokens, so `cckit report` and usage_report.py can estimate cost. Match by a word in the model name.
+# Use the rates of YOUR agreement; none are built in because they change.
 # [prices.sonnet]
 # input = 3.0
 # output = 15.0
@@ -228,6 +234,13 @@ def validate(cfg: dict) -> list[str]:
         errs.append("[monitoring] warn_context_pct must be an integer from 1 to 100")
     if not isinstance(mon.get("otel_endpoint"), str):
         errs.append("[monitoring] otel_endpoint must be a string")
+    us = cfg["usage"]
+    for k in ("log", "scripts"):
+        if not isinstance(us.get(k), bool):
+            errs.append(f"[usage] {k} must be true or false")
+    cp = us.get("csv_path")
+    if not isinstance(cp, str) or not cp.strip() or cp.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", cp) or ".." in cp.replace("\\", "/").split("/"):
+        errs.append("[usage] csv_path must be a relative path inside the repository, for example .claude/token_usage.csv")
     tel = cfg["telemetry"]
     for k in ("enabled", "send_project", "auto_register"):
         if not isinstance(tel.get(k), bool):

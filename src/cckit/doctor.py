@@ -109,6 +109,9 @@ def run(root: Path, check_claude: bool = True) -> Report:
             for rule in want["permissions"]["deny"]:
                 if rule not in ((s.get("permissions") or {}).get("deny") or []):
                     missing.append(f"deny {rule}")
+            for rule in want["permissions"].get("allow", []):
+                if rule not in ((s.get("permissions") or {}).get("allow") or []):
+                    missing.append(f"allow {rule}")
             for ev in (want.get("hooks") or {}):
                 if not any(render.is_cckit_hook(e) for e in ((s.get("hooks") or {}).get(ev) or [])):
                     missing.append(f"{ev} hook")
@@ -177,6 +180,10 @@ def run(root: Path, check_claude: bool = True) -> Report:
         scripts.append(render.STATUS_SCRIPT)
     if config.telemetry_active(cfg):
         scripts.append(render.COMPACT_SCRIPT)
+    if cfg["usage"]["log"]:
+        scripts.append(render.LOG_SCRIPT)
+    if cfg["usage"]["scripts"]:
+        scripts += [render.REPORT_SCRIPT, render.USAGE_COMMAND]
     for rel in scripts:
         if not (root / rel).exists():
             r.add("fail", f"{rel} is missing. Run `cckit init`.")
@@ -186,6 +193,16 @@ def run(root: Path, check_claude: bool = True) -> Report:
             r.add("ok", f"hook interpreter '{py}' found")
         else:
             r.add("warn", f"hook interpreter '{py}' is not on this machine's PATH. Hooks will not run here (set [hooks] python, e.g. 'python' on Windows).")
+
+    # 5a. the local usage log must not be committed
+    if cfg["usage"]["log"]:
+        gi = root / ".gitignore"
+        if gi.exists() and render.GITIGNORE_BEGIN.split(" - ")[0] in gi.read_text(encoding="utf-8"):
+            csv_path = root / cfg["usage"]["csv_path"]
+            n = max(0, len(csv_path.read_text(encoding="utf-8").splitlines()) - 1) if csv_path.exists() else 0
+            r.add("ok", f"{cfg['usage']['csv_path']} is git-ignored" + (f" ({n} response(s) logged so far)" if csv_path.exists() else " (created at the first response)"))
+        else:
+            r.add("warn", f".gitignore has no cckit block, so {cfg['usage']['csv_path']} could be committed. Run `cckit init`.")
 
     # 5b. compaction reporting
     tel = cfg["telemetry"]

@@ -103,6 +103,8 @@ def test_optional_switches():
     cfg["model"]["block_opus_subagents"] = False
     cfg["hooks"]["trim_test_output"] = False
     cfg["monitoring"]["statusline"] = False
+    cfg["usage"]["log"] = False
+    cfg["usage"]["scripts"] = False
     s = render.build_settings(cfg)
     assert "CLAUDE_CODE_DISABLE_1M_CONTEXT" not in s["env"]
     assert s["env"]["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"] == "1"
@@ -116,7 +118,8 @@ def test_init_creates_everything_and_is_idempotent(repo):
     assert r1.changed > 0
     for rel in ("cckit.toml", "CLAUDE.md", ".claude/settings.json", ".claude/agents/explorer.md", ".claude/agents/test-runner.md",
                 ".claude/agents/reviewer.md", ".claude/rules/testing.md", ".claude/hooks/trim_output.py", ".claude/hooks/statusline.py",
-                ".cckit/mcp-profiles/none.json", ".cckit/managed-settings.example.json", ".cckit/manifest.json"):
+                ".cckit/mcp-profiles/none.json", ".cckit/managed-settings.example.json", ".cckit/manifest.json",
+                ".claude/hooks/log_token_usage.py", ".claude/scripts/usage_report.py", ".claude/commands/usage.md", ".gitignore"):
         assert (repo / rel).exists(), rel
     before = {p: read(p) for p in repo.rglob("*") if p.is_file()}
     r2 = apply.init(repo)
@@ -138,7 +141,8 @@ def test_init_keeps_users_own_settings_and_reports_conflicts(repo):
     res = apply.init(repo)
     s = settings(repo)
     assert s["model"] == "opus" and s["env"]["BASH_MAX_OUTPUT_LENGTH"] == "99999" and s["env"]["FOO"] == "bar"
-    assert s["permissions"]["allow"] == ["Bash(npm run lint)"] and "Read(./.env)" in s["permissions"]["deny"]
+    assert s["permissions"]["allow"][0] == "Bash(npm run lint)" and "Read(./.env)" in s["permissions"]["deny"]
+    assert s["permissions"]["allow"][1:] == ["Bash(python3 .claude/scripts/usage_report.py:*)"]            # cckit's own rule is added after the user's
     assert s["enabledPlugins"] == {"x": True}
     assert any("kept your 'model'" in n for n in res.lines)
     apply.init(repo, force=True)

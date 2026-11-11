@@ -62,8 +62,10 @@ def _parse_ts(s: str) -> datetime | None:
 def collect(base: Path, days: int | None = None, project: str | None = None):
     """Yield one record per API response: (project, session, day, model, sidechain, usage)."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days) if days else None
-    for f in sorted(Path(base).glob("*/*.jsonl")):
-        proj = f.parent.name
+    # a session is <project>/<session>.jsonl; its subagents are <project>/<session>/subagents/agent-*.jsonl (counted as subagent requests)
+    files = [(f, False) for f in sorted(Path(base).glob("*/*.jsonl"))] + [(f, True) for f in sorted(Path(base).glob("*/*/subagents/*.jsonl"))]
+    for f, nested in files:
+        proj = f.parent.parent.parent.name if nested else f.parent.name
         if project and project.lower() not in proj.lower():
             continue
         if cutoff and datetime.fromtimestamp(f.stat().st_mtime, timezone.utc) < cutoff:
@@ -92,7 +94,8 @@ def collect(base: Path, days: int | None = None, project: str | None = None):
                     continue
                 key = m.get("id") or d.get("uuid") or str(len(last))
                 # a response is written once per content block with growing counts: the last one is the final total
-                last[key] = (proj, d.get("sessionId") or f.stem, (ts.date().isoformat() if ts else ""), model, bool(d.get("isSidechain")), u)
+                last[key] = (proj, d.get("sessionId") or (f.parent.parent.name if nested else f.stem), (ts.date().isoformat() if ts else ""), model,
+                             nested or bool(d.get("isSidechain")), u)
         yield from last.values()
 
 
