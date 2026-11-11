@@ -81,7 +81,7 @@ def test_enabled_without_endpoint_warns_and_writes_no_hook(tmp_path):
     apply.init(tmp_path)
     assert "PreCompact" not in json.loads(read(tmp_path / ".claude/settings.json"))["hooks"]
     rep = doctor.run(tmp_path, check_claude=False)
-    assert any(lv == "warn" and "endpoint is empty" in t for lv, t in rep.items)
+    assert any(lv == "warn" and "no URL is set" in t for lv, t in rep.items)
 
 
 @pytest.mark.parametrize("key", ["endpoint", "register_url", "usage_url"])
@@ -991,3 +991,77 @@ def test_the_exported_app_runs_on_its_own_and_serves_the_client(tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+# ------------------------------------------------------------------ URLs from the config file: endpoint is optional when both API URLs are given
+URLS = {"endpoint": "", "register_url": "https://app.example.com/api/register", "usage_url": "https://app.example.com/api/usage", "ping_url": ""}
+
+
+def test_ping_url_is_derived_from_the_sibling_urls_unless_given():
+    assert config.api_url(URLS, "ping") == "https://app.example.com/api/ping"
+    assert config.api_url(dict(URLS, ping_url="https://app.example.com/health"), "ping") == "https://app.example.com/health"
+    assert config.api_url(dict(URLS, register_url="https://app.example.com/signup", usage_url="https://app.example.com/send"), "ping") == ""
+    assert config.api_url({"endpoint": "https://h/", "register_url": "", "usage_url": "", "ping_url": ""}, "ping") == "https://h/?api=ping"
+    assert config.api_url({"endpoint": "", "register_url": "", "usage_url": "", "ping_url": ""}, "register") == ""
+
+
+def test_identity_key_is_the_endpoint_or_the_usage_url():
+    assert config.identity_key(URLS) == "https://app.example.com/api/usage"
+    assert config.identity_key(dict(URLS, endpoint="https://app.example.com/")) == "https://app.example.com/"
+    assert config.identity_key({"endpoint": "", "usage_url": ""}) == ""
+
+
+def test_both_urls_without_an_endpoint_switch_telemetry_on(tmp_path):
+    (tmp_path / "cckit.toml").write_text('[telemetry]\nenabled = true\nregister_url = "https://app.example.com/api/register"\nusage_url = "https://app.example.com/api/usage"\nteam_key = "k"\n')
+    apply.init(tmp_path)
+    src = read(tmp_path / ".claude/hooks/compact_report.py")
+    assert '"https://app.example.com/api/register"' in src and '"https://app.example.com/api/usage"' in src
+    assert 'ENDPOINT = "https://app.example.com/api/usage"' in src                  # the identity key
+    s = json.loads(read(tmp_path / ".claude/settings.json"))
+    assert "PreCompact" in s["hooks"] and "SessionStart" in s["hooks"]
+    assert not any(lv in ("warn", "fail") and "URL" in t for lv, t in doctor.run(tmp_path, check_claude=False).items)
+
+
+def test_only_one_of_the_two_urls_is_not_enough(tmp_path):
+    (tmp_path / "cckit.toml").write_text('[telemetry]\nenabled = true\nregister_url = "https://app.example.com/api/register"\n')
+    apply.init(tmp_path)
+    assert "PreCompact" not in json.loads(read(tmp_path / ".claude/settings.json"))["hooks"]
+    assert any(lv == "warn" and "no URL is set" in t for lv, t in doctor.run(tmp_path, check_claude=False).items)
+
+
+def test_changing_the_domain_means_a_new_identity_key(tmp_path):
+    identity.save_identity("https://old.example.com/api/usage", ADA, "", "tok")
+    t = dict(URLS, usage_url="https://new.example.com/api/usage", register_url="https://new.example.com/api/register")
+    assert identity.get_identity(config.identity_key(t)) is None                    # not registered on the new app yet: the hook registers again
+    assert identity.get_identity("https://old.example.com/api/usage")["token"] == "tok"
+
+
+def test_end_to_end_with_path_style_urls_and_no_endpoint(server, tmp_path, capsys):
+    (tmp_path / "cckit.toml").write_text(f'[telemetry]\nenabled = true\nregister_url = "{server}/api/register"\nusage_url = "{server}/api/usage"\nteam_key = "{KEY}"\n')
+    apply.init(tmp_path)
+    assert cli.main(["whoami", str(tmp_path), "--check"]) == 0
+    out = capsys.readouterr().out
+    assert f"ping:       {server}/api/ping" in out and "check:      ok" in out
+    assert cli.main(["register", str(tmp_path), "--email", ADA]) == 0
+    assert identity.get_identity(f"{server}/api/usage")["email"] == ADA
+    run_hook(tmp_path, rich_transcript(tmp_path / "t.jsonl"))
+    assert rows(server, "Claude_Compactions")[0]["Email"] == ADA
+    assert cli.main(["doctor", str(tmp_path), "--no-claude"]) == 0
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_session_start_registers_through_path_style_urls(server, tmp_path):
+    (tmp_path / "cckit.toml").write_text(f'[telemetry]\nenabled = true\nregister_url = "{server}/api/register"\nusage_url = "{server}/api/usage"\nteam_key = "{KEY}"\n')
+    apply.init(tmp_path)
+    git_repo(tmp_path, email=ADA)
+    assert "registered" in session_start(tmp_path)["systemMessage"]
+    assert identity.get_identity(f"{server}/api/usage")["email"] == ADA
+
+
+def test_server_routes_by_path_as_well_as_by_query(server):
+    reg = identity.post_json(server + "/anything/register", {"email": ADA, "team_key": KEY})
+    assert reg["ok"] is True
+    assert identity.post_json(server + "/a/b/usage", {"email": ADA, "token": reg["token"], "event_id": "p1"}) == {"ok": True}
+    assert http_get(server + "/api/ping")[1]["ready"] is True
+    assert identity.post_json(server + "/api/nothing", {"x": 1})["error"].startswith("unknown api")
+    assert http_get(server + "/api/export?table=users", ADMIN)[1]["ok"] is True

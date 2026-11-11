@@ -13,7 +13,7 @@ data in one SQLite file. Python 3.9 or newer.
 | `GET /healthz` | load balancers | none | `{"ok": true}` |
 | `GET /?api=export&table=events\|users&after=ID&limit=N[&format=csv]` | you, or a script | `Authorization: Bearer <admin token>` | reads the data as JSON or CSV |
 
-The path is not significant (`/`, `/exec`, `/v1/anything` all work); routing is by the `api` query parameter. Bodies are JSON, sent as `text/plain` or `application/json`.
+Routing is by the `api` query parameter, or by the last path segment: `POST /api/register` is the same as `POST /?api=register` (likewise `/api/usage`, `/api/ping`, `/api/export`). Any prefix works, so a platform that only allows POST under `/api/` is fine. Bodies are JSON, sent as `text/plain` or `application/json`.
 Application errors come back as **HTTP 200** with `{"ok": false, "error": "..."}` (so clients read one shape); transport problems use 401 (bad admin token), 403 (export not enabled),
 405, 500.
 

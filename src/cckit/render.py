@@ -109,7 +109,7 @@ def render_trim_script(cfg: dict) -> str:
 def render_compact_script(cfg: dict) -> str:
     t = cfg["telemetry"]
     return (asset("compact_report.py.tpl")
-            .replace("__ENDPOINT__", json.dumps(t["endpoint"]))
+            .replace("__ENDPOINT__", json.dumps(config.identity_key(t)))
             .replace("__REGISTER_URL__", json.dumps(config.api_url(t, "register")))
             .replace("__USAGE_URL__", json.dumps(config.api_url(t, "usage")))
             .replace("__DOMAINS__", json.dumps(list(t["allowed_domains"])))

@@ -26,7 +26,7 @@ def cmd_init(args) -> int:
           "\nNext: run `cckit doctor`, review the diff, and commit cckit.toml, CLAUDE.md, .claude/ and .cckit/.")
     if not args.dry_run:
         cfg = config.load(_root(args))
-        if config.telemetry_active(cfg) and not identity.get_identity(cfg["telemetry"]["endpoint"]):
+        if config.telemetry_active(cfg) and not identity.get_identity(config.identity_key(cfg["telemetry"])):
             print("\nCompaction reports are on for this repo and this machine is not registered yet.")
             have_key = bool(cfg["telemetry"]["team_key"] or os.environ.get("CCKIT_TEAM_KEY"))
             if sys.stdin.isatty() and sys.stdout.isatty() or (have_key and identity.detect_email(str(_root(args)), cfg["telemetry"]["allowed_domains"])):
@@ -41,11 +41,11 @@ def cmd_init(args) -> int:
 
 def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None, endpoint: str | None, team_key: str | None) -> int:
     t = cfg["telemetry"]
-    endpoint = endpoint or t["endpoint"]
-    if not endpoint or not config.valid_endpoint(endpoint):
-        print("error: no valid endpoint. Set [telemetry] endpoint in cckit.toml (an https:// URL) or pass --endpoint.", file=sys.stderr)
+    urls = {"endpoint": endpoint} if endpoint else t                 # --endpoint overrides every URL in cckit.toml
+    key, register_url = config.identity_key(urls), config.api_url(urls, "register")
+    if not register_url or not config.valid_endpoint(register_url):
+        print("error: no valid register URL. Set [telemetry] endpoint (or register_url) in cckit.toml to an https:// URL, or pass --endpoint.", file=sys.stderr)
         return 2
-    urls = {"endpoint": endpoint} if endpoint != t["endpoint"] else t
     domains = t["allowed_domains"]
     interactive = sys.stdin.isatty()
     if not email:
@@ -80,7 +80,7 @@ def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None,
             return 2
         team_key = input("Team key (from your admin): ").strip()
     try:
-        res = identity.register(endpoint, config.api_url(urls, "register"), team_key, email, github, domains)
+        res = identity.register(key, register_url, team_key, email, github, domains)
     except identity.RegisterError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -139,21 +139,25 @@ def cmd_whoami(args) -> int:
         return 2
     t = cfg["telemetry"]
     print(f"telemetry:  {'on' if t['enabled'] else 'off'} (events: {', '.join(t['events'])})")
-    print(f"endpoint:   {t['endpoint'] or '(not set)'}")
-    who = identity.get_identity(t["endpoint"]) if t["endpoint"] else None
+    key = config.identity_key(t)
+    show = lambda u: u or "(not set)"
+    print(f"endpoint:   {show(t['endpoint'])}")
+    who = identity.get_identity(key) if key else None
     print(f"registered: {(who['email'] + (' / GitHub ' + who['github'] if who.get('github') else '')) if who else 'no'}   (identity file: {identity.identity_path()})")
-    print(f"register:   {config.api_url(t, 'register') if t['endpoint'] else '(not set)'}")
-    print(f"usage:      {config.api_url(t, 'usage') if t['endpoint'] else '(not set)'}")
+    print(f"register:   {show(config.api_url(t, 'register'))}")
+    print(f"usage:      {show(config.api_url(t, 'usage'))}")
+    print(f"ping:       {show(config.api_url(t, 'ping'))}")
     if args.check:
-        if not t["endpoint"]:
-            print("check:      skipped, no endpoint")
+        ping_url = config.api_url(t, "ping")
+        if not ping_url:
+            print("check:      skipped, no URL (set endpoint, or ping_url)")
             return 1
         try:
-            d = identity.ping(t["endpoint"])
+            d = identity.ping(ping_url)
         except identity.RegisterError as e:
             print(f"check:      FAILED, {e}")
             return 1
-        print(f"check:      {'ok' if d.get('ok') else 'FAILED'}" + ("" if d.get("ready", True) else " (endpoint reachable but not set up: admin must run 'Set up Claude usage API')"))
+        print(f"check:      {'ok' if d.get('ok') else 'FAILED'}" + ("" if d.get("ready", True) else " (the app answered but says it is not ready: its team key or admin token is not configured)"))
         return 0 if d.get("ok") and d.get("ready", True) else 1
     return 0
 

@@ -4,6 +4,7 @@ Run it:                python usage_api.py run --host 0.0.0.0 --port 8080
 Behind gunicorn:       gunicorn -w 1 --threads 8 usage_api:application      (one worker: SQLite and the lock live in one process)
 Admin tools:           python usage_api.py keys | users | deactivate EMAIL | activate EMAIL | reset EMAIL | dump --table events --out events.csv
 
+  (every endpoint is also reachable by path: POST /api/register, POST /api/usage, GET /api/ping, GET /api/export ...)
   POST /?api=register   {"email", "github"?, "team_key"}                       -> {"ok", "email", "github", "token", "devices", "verified"}
   POST /?api=usage      {"email", "token", "event_id", "trigger", "model", ...} -> {"ok"}
   GET  /?api=ping                                                              -> {"ok", "service", "ready"}
@@ -259,9 +260,13 @@ class UsageApi:
             return c.execute("UPDATE users SET token_hashes = '' WHERE email = ?", (email.strip().lower(),)).rowcount > 0
 
     # ---------------------------------------------------------------- HTTP-shaped entry point
-    def handle(self, method: str, query: dict, body: bytes, auth: str = "") -> tuple[int, dict]:
-        """Returns (http status, JSON object). Application errors are 200 with ok:false, so that clients read one shape."""
+    def handle(self, method: str, query: dict, body: bytes, auth: str = "", path: str = "") -> tuple[int, dict]:
+        """Returns (http status, JSON object). Application errors are 200 with ok:false, so that clients read one shape.
+        The API is chosen by ?api=NAME, or by the last path segment (/api/register, /register ...)."""
         api = (query.get("api") or [""])[0]
+        if not api:
+            seg = path.rstrip("/").rsplit("/", 1)[-1]
+            api = seg if seg in ("register", "usage", "ping", "export") else ""
         try:
             if method == "GET":
                 if api == "ping":
@@ -306,9 +311,9 @@ def to_csv(columns: list, rows: list) -> str:
     return buf.getvalue()
 
 
-def respond(api: UsageApi, method: str, query: dict, body: bytes, auth: str) -> tuple[int, str, bytes]:
+def respond(api: UsageApi, method: str, query: dict, body: bytes, auth: str, path: str = "") -> tuple[int, str, bytes]:
     """(status, content type, body). Export answers CSV when ?format=csv, everything else is JSON."""
-    status, obj = api.handle(method, query, body, auth)
+    status, obj = api.handle(method, query, body, auth, path)
     if status == 200 and (query.get("format") or [""])[0] == "csv" and "columns" in obj:
         return 200, "text/csv; charset=utf-8", to_csv(obj["columns"], obj["rows"]).encode("utf-8")
     return status, "application/json", json.dumps(obj).encode("utf-8")
@@ -344,7 +349,7 @@ def make_server(host: str, port: int, api: UsageApi) -> ThreadingHTTPServer:
                     self.close_connection = True
                     return self._send(*TOO_LARGE)
                 body = self.rfile.read(n)                           # up to 64 KB, so the client always gets its answer
-            self._send(*respond(api, method, parse_qs(u.query), body, self.headers.get("Authorization", "")))
+            self._send(*respond(api, method, parse_qs(u.query), body, self.headers.get("Authorization", ""), u.path))
 
         def do_GET(self):
             self._go("GET")
@@ -389,7 +394,7 @@ def application(environ, start_response):
                     status, ctype, data = TOO_LARGE
                     start_response("200 OK", [("Content-Type", ctype), ("Content-Length", str(len(data)))])
                     return [data]
-            status, ctype, data = respond(_APP, method, query, body, environ.get("HTTP_AUTHORIZATION", ""))
+            status, ctype, data = respond(_APP, method, query, body, environ.get("HTTP_AUTHORIZATION", ""), environ.get("PATH_INFO", ""))
     except ValueError as e:                                   # not configured: say so in the log, not to the caller
         print(f"cckit usage API is not configured: {e}", file=sys.stderr)
         status, ctype, data = 500, "application/json", b'{"ok": false, "error": "server error"}'

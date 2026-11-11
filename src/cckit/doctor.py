@@ -189,12 +189,13 @@ def run(root: Path, check_claude: bool = True) -> Report:
 
     # 5b. compaction reporting
     tel = cfg["telemetry"]
-    if tel["enabled"] and not tel["endpoint"]:
-        r.add("warn", "[telemetry] is enabled but endpoint is empty, so nothing is reported. Deploy the usage app (`cckit server export-app` writes it, with a README) and paste its URL.")
+    if tel["enabled"] and not config.telemetry_active(cfg):
+        r.add("warn", "[telemetry] is enabled but no URL is set, so nothing is reported. Set `endpoint`, or both `register_url` and `usage_url`, to the deployed usage app "
+                      "(`cckit server export-app` writes one, with a README).")
     elif config.telemetry_active(cfg):
         if tel["auto_register"] and not tel["team_key"]:
             r.add("warn", "[telemetry] auto_register needs team_key: without it developers cannot be registered automatically")
-        who = identity.get_identity(tel["endpoint"])
+        who = identity.get_identity(config.identity_key(tel))
         if who:
             r.add("ok", f"compaction reports on; this machine is registered as {who['email']}")
         else:

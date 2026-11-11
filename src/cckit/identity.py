@@ -149,7 +149,7 @@ def post_json(url: str, payload: dict, timeout: float = 20) -> dict:
     try:
         d = json.loads(body)
     except json.JSONDecodeError as e:
-        raise RegisterError(SIGN_IN_HINT if looks_like_sign_in(body) else "the endpoint did not answer JSON. Is the URL a deployed /exec URL?") from e
+        raise RegisterError(SIGN_IN_HINT if looks_like_sign_in(body) else "the endpoint did not answer JSON. Is the URL the address of the usage app's API?") from e
     return d if isinstance(d, dict) else {}
 
 
@@ -163,16 +163,16 @@ def looks_like_sign_in(body: str, final_url: str = "") -> bool:
 
 
 def ping(url: str, timeout: float = 15) -> dict:
-    sep = "&" if "?" in url else "?"
+    """GET the health URL (see config.api_url(t, "ping")) and return its JSON."""
     try:
-        with urllib.request.urlopen(urllib.request.Request(url + sep + "api=ping", headers={"User-Agent": "cckit"}), timeout=timeout) as r:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "cckit"}), timeout=timeout) as r:
             body, final = r.read().decode("utf-8", "replace"), r.geturl()
     except urllib.error.URLError as e:
         raise RegisterError(f"ping failed: {getattr(e, 'reason', e)}") from e
     try:
         d = json.loads(body)
     except ValueError as e:
-        raise RegisterError(SIGN_IN_HINT if looks_like_sign_in(body, final) else "ping failed: the endpoint did not answer JSON. Is the URL a deployed /exec URL?") from e
+        raise RegisterError(SIGN_IN_HINT if looks_like_sign_in(body, final) else "ping failed: the URL did not answer JSON. Is it the address of the usage app's health route?") from e
     return d if isinstance(d, dict) else {}
 
 

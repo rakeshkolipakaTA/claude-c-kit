@@ -73,10 +73,10 @@ otel_endpoint = ""            # set to your collector (for example http://collec
 
 [telemetry]                   # report every context compaction to the team usage app (`cckit server export-app` writes it; see `cckit register`)
 enabled = false
-endpoint = ""                 # the "Usage API" /exec URL (https://script.google.com/macros/s/.../exec). Two APIs live behind it:
-                              # ?api=register (sign up) and ?api=usage (post a compaction).
-register_url = ""             # optional: full URL of the register API, if you deploy it separately (default: endpoint + ?api=register)
-usage_url = ""                # optional: full URL of the usage API (default: endpoint + ?api=usage)
+endpoint = ""                 # base URL of the usage app. Then register is <endpoint>?api=register and usage is <endpoint>?api=usage.
+register_url = ""             # OR give each API its own full URL (an app whose routes are /api/register and /api/usage, say). These win over endpoint.
+usage_url = ""                #   With both set, endpoint can stay empty. Change a domain or an app by editing these lines and running `cckit init`.
+ping_url = ""                 # optional health check for `cckit whoami --check` (default: endpoint?api=ping, or .../ping next to register_url)
 allowed_domains = ["tigeranalytics.com"]   # registration needs an e-mail on one of these domains (checked here and again on the server)
 team_key = ""                 # join code for `cckit register`. Anyone who can read this repo can read it: it only keeps strangers out
 auto_register = true          # a SessionStart hook takes the developer's company e-mail from `git config user.email` (plus their GitHub login,
@@ -144,16 +144,30 @@ def valid_endpoint(url: str) -> bool:
 
 
 def api_url(t: dict, name: str) -> str:
-    """URL of one of the two APIs: an explicit [telemetry] register_url / usage_url, else the endpoint with ?api=NAME."""
+    """URL of one API (register | usage | ping): the explicit [telemetry] <name>_url, else <endpoint>?api=<name>, else (for ping) the sibling of
+    register_url / usage_url (.../api/register -> .../api/ping). Empty when nothing is configured."""
     if t.get(f"{name}_url"):
         return t[f"{name}_url"]
-    base = t["endpoint"]
-    return base + ("&" if "?" in base else "?") + "api=" + name
+    base = t.get("endpoint") or ""
+    if base:
+        return base + ("&" if "?" in base else "?") + "api=" + name
+    if name == "ping":
+        for k in ("register_url", "usage_url"):
+            u = t.get(k) or ""
+            for suffix in ("/register", "/usage"):
+                if u.endswith(suffix):
+                    return u[: -len(suffix)] + "/ping"
+    return ""
+
+
+def identity_key(t: dict) -> str:
+    """What the per-machine token is filed under: the endpoint, or the usage URL when there is no endpoint. A new app or domain means a new key."""
+    return t.get("endpoint") or t.get("usage_url") or ""
 
 
 def telemetry_active(cfg: dict) -> bool:
     t = cfg["telemetry"]
-    return bool(t["enabled"] and t["endpoint"])
+    return bool(t["enabled"] and api_url(t, "register") and api_url(t, "usage"))
 
 
 def _is_int(v) -> bool:
@@ -220,7 +234,7 @@ def validate(cfg: dict) -> list[str]:
             errs.append(f"[telemetry] {k} must be true or false")
     if not isinstance(tel.get("team_key"), str):
         errs.append("[telemetry] team_key must be a string")
-    for k in ("endpoint", "register_url", "usage_url"):
+    for k in ("endpoint", "register_url", "usage_url", "ping_url"):
         if not isinstance(tel.get(k), str) or (tel[k] and not valid_endpoint(tel[k])):
             errs.append(f"[telemetry] {k} must be an https:// URL (http:// is allowed only for localhost)")
     doms = tel.get("allowed_domains")

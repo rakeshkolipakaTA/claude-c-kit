@@ -64,6 +64,16 @@ to a small app you deploy yourself (it must be reachable without a login, becaus
 | `GET /?api=ping`, `GET /healthz` | health |
 | `GET /?api=export&table=events\|users[&format=csv]` | read the data (admin token) |
 
+- **Where the URLs live: `cckit.toml`.** Either one base `endpoint` (the APIs are `<endpoint>?api=register` and `<endpoint>?api=usage`), or each API's own URL, with `endpoint` left empty:
+  ```
+  [telemetry]
+  enabled = true
+  register_url = "https://claude-code-usage.hatchable.site/api/register"
+  usage_url    = "https://claude-code-usage.hatchable.site/api/usage"
+  ping_url     = ""          # optional; default: .../api/ping next to register_url (used by `cckit whoami --check`)
+  team_key     = "..."
+  ```
+  Changing the app or the domain means editing these lines, running `cckit init` (it rewrites the hook) and committing. Each machine's token is filed under the endpoint (or the usage URL), so a new address means a new registration, which the hook does by itself at the next session.
 - **Nothing to type for developers.** A `SessionStart` hook takes the company e-mail from `git config user.email` (a personal address is ignored and never sent) and, as optional extra, a GitHub login from git or `gh`; it shows one line saying what it used. With no company e-mail it asks Claude to ask the developer (at most every 3 days). Manual: `cckit register [--email E] [--github G]`, `cckit whoami --check`, `cckit doctor`.
 - The personal token (one per machine, up to 5 per developer) is saved in `~/.config/cckit/identity.json` (0600, never in the repo); the app keeps only its hash. `CCKIT_TELEMETRY=off` opts one machine out; `auto_register = false` turns the automatic step off for the repo.
 - The PreCompact hook runs in the background, prints nothing, reads the transcript for numbers and tool **names** only (never prompts, code, paths, tool inputs/outputs or the summary), and does nothing when unregistered or offline.
