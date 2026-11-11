@@ -11,7 +11,7 @@ Columns: timestamp, session_id, message_id, model, input_tokens, output_tokens, 
 
 Reporting (only when [telemetry] stop_report is on and this machine is registered): the same numbers are added up per model and sent to the team's
 usage API as trigger "stop" events, at most once every `stop_interval` seconds (default: every Stop). An event holds the company e-mail and token, the model, the token counts since the previous
-event (main + subagents), request counts, how many times this hook fired (turns) and how many seconds the turn took from the prompt to the last line, the current model, effort, Claude Code version, entrypoint, branch and the tool names used, the current context size, the repo folder name and the session id: no prompts, code or replies. Events
+event (main + subagents), request counts, how many times this hook fired (turns) and how many seconds the turn took from the prompt to the last line, how many minutes the session has been running, the current model, effort, Claude Code version, entrypoint, branch and the tool names used, the current context size, the repo folder name and the session id: no prompts, code or replies. Events
 that could not be delivered wait in the state file (at most 200, retried with a growing pause) and are sent with a fixed event id, so a retry
 never counts twice. Opt out on one machine with CCKIT_TELEMETRY=off.
 """
@@ -121,6 +121,24 @@ def ts(v):
         return None
 
 
+def first_timestamp(path):
+    """When the session began: the first timestamp near the top of its transcript."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(65536)
+    except OSError:
+        return None
+    for raw in head.splitlines()[:40]:
+        if b'"timestamp"' in raw:
+            try:
+                t = ts(json.loads(raw).get("timestamp"))
+            except (ValueError, AttributeError):
+                continue
+            if t:
+                return t
+    return None
+
+
 def is_prompt(o, m):
     """A line the developer typed (not a tool result, not a subagent, not a system line)."""
     if o.get("type") != "user" or o.get("isSidechain") or o.get("isMeta") or o.get("isCompactSummary") or not isinstance(m, dict):
@@ -224,6 +242,8 @@ def add_pending(state, rows):
 def add_turn(state, meta):
     """Facts about the turn(s) waiting for the next event: seconds from the prompt to the end of the answer, tools used, current model and settings."""
     t = state.get("turn") if isinstance(state.get("turn"), dict) else {}
+    if meta.get("session_start") and meta.get("end"):
+        t["session_minutes"] = max(0, int((meta["end"] - meta["session_start"]).total_seconds() // 60))      # since the session began: a running total
     if meta.get("start") and meta.get("end"):
         t["duration_s"] = int(t.get("duration_s") or 0) + max(0, int((meta["end"] - meta["start"]).total_seconds()))
     tools = t.get("tools") if isinstance(t.get("tools"), dict) else {}
@@ -250,7 +270,8 @@ def flush_pending(state, now, project):
     for model, p in pend.items():
         first = model == main                                 # turns, duration and tool counts go on one event only, so that sums stay right
         box.append({"event_id": uuid.uuid4().hex, "trigger": "stop", "model": model, "turns": int(state.get("stops") or 0) if first else 0,
-                    "duration_s": int(t["duration_s"]) if first and "duration_s" in t else None, "current_model": t.get("current_model") or main,
+                    "duration_s": int(t["duration_s"]) if first and "duration_s" in t else None,
+                    "session_minutes": t.get("session_minutes") if first else None, "current_model": t.get("current_model") or main,
                     "effort": t.get("effort", ""), "claude_version": t.get("claude_version", ""), "entrypoint": t.get("entrypoint", ""),
                     "branch": t.get("branch", "") if SEND_PROJECT else "", "tool_calls": sum(tools.values()) if first else 0,
                     "tools": ";".join("%s:%d" % kv for kv in sorted(tools.items(), key=lambda kv: -kv[1])[:8]) if first else "",
@@ -361,6 +382,7 @@ def main():
                 add_pending(state, rows)
                 if not sub_event:
                     state["stops"] = int(state.get("stops") or 0) + 1       # one turn of the main agent
+                    meta["session_start"] = first_timestamp(tpath)
                     add_turn(state, meta)
                 flush_pending(state, time.time(), os.path.basename(str(root).rstrip("/\\")) if SEND_PROJECT else "")
             write_state(state_file, state)

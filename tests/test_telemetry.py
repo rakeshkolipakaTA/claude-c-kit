@@ -1576,10 +1576,12 @@ def test_each_turn_reports_current_model_effort_tools_and_duration(server, tmp_p
     for r in (o, h):
         assert (r["Current Model"], r["Effort"], r["Claude Version"], r["Entrypoint"], r["Branch"]) == ("claude-opus-5-5", "max", "2.1.400", "cli", "feature/x")
     assert o["Output Tokens"] == 50 and h["Output Tokens"] == 5                                                   # model-level usage stays separate
+    assert o["Session"] == h["Session"] == "sess-1" and o["Session Minutes"] == 1                                 # 95 s since the session began
     tr.write_text(tr.read_text() + "\n".join(turn_lines("b", 300, model="claude-sonnet-5-5", effort="low", tools=("Edit",))) + "\n")
     stop_hook(tmp_path, tr)                                                                                       # the second turn: only its own prompt, tools and time
     s = [r for r in stop_events(server) if r["Model"] == "claude-sonnet-5-5"][0]
     assert (s["Turns"], s["Duration (s)"], s["Tool Calls"], s["Tools"], s["Current Model"], s["Effort"]) == (1, 95, 1, "Edit:1", "claude-sonnet-5-5", "low")
+    assert s["Session Minutes"] == 6                                                                              # a running total: 395 s since the first line
     whole = json.dumps(dump(server)) + (tmp_path / ".claude/token_usage.csv.state.json").read_text()
     assert "SECRET" not in whole                                                                                  # prompts and tool inputs never leave the machine
 
