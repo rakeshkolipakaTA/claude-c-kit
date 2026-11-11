@@ -15,15 +15,17 @@ from pathlib import Path
 
 import pytest
 
-from cckit import apply, cli, config, doctor, identity, render
+from cckit import apply, cli, config, doctor, identity, render, server as usage_server
 
 SIM = Path(__file__).parent / "sim" / "usage_server_sim.js"
 GS_DIR = Path(render.__file__).parent / "assets" / "apps_script"
 KEY = "teamkey123"
+ADMIN = "admintoken456"
 DOM = "tigeranalytics.com"
 ADA = "ada.lovelace@tigeranalytics.com"
 GIT = shutil.which("git")
 NODE = shutil.which("node")     # resolved now: the fixture below narrows PATH
+REAL_PATH = os.environ.get("PATH", "")
 
 
 def read(p):
@@ -375,23 +377,66 @@ def test_metrics_of_a_missing_or_empty_transcript_are_zero(tmp_path):
 
 
 # ------------------------------------------------------------------ the two APIs, end to end against the real Apps Script files
-@pytest.fixture
-def server():
-    if not NODE:
-        pytest.skip("needs node")
-    proc = subprocess.Popen([NODE, str(SIM), str(GS_DIR), KEY], stdout=subprocess.PIPE, text=True)
-    port = int(proc.stdout.readline().split()[1])
-    yield f"http://127.0.0.1:{port}"
-    proc.terminate()
+BACKENDS = {}      # base URL -> (kind, UsageApi or None): lets the helpers below read either backend the same way
+
+
+def fake_github(login):
+    return {"nosuchuser": "No", "ratelimited": "Unchecked"}.get(login, "Yes")
+
+
+@pytest.fixture(params=["appscript", "python"])
+def server(request, tmp_path_factory):
+    """The same API twice: the Google Apps Script files (run in Node) and `cckit server` (Python). Every test using this fixture must pass on both."""
+    if request.param == "appscript":
+        if not NODE:
+            pytest.skip("needs node")
+        proc = subprocess.Popen([NODE, str(SIM), str(GS_DIR), KEY], stdout=subprocess.PIPE, text=True)
+        base = f"http://127.0.0.1:{int(proc.stdout.readline().split()[1])}"
+        BACKENDS[base] = ("appscript", None)
+        yield base
+        proc.terminate()
+        return
+    import threading
+    api = usage_server.UsageApi(str(tmp_path_factory.mktemp("db") / "usage.db"), KEY, [DOM], admin_token=ADMIN, github_check=fake_github)
+    srv = usage_server.make_server("127.0.0.1", 0, api)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    BACKENDS[base] = ("python", api)
+    yield base
+    srv.shutdown()
+    srv.server_close()
 
 
 def dump(base):
-    return json.loads(urllib.request.urlopen(base + "/_dump").read())
+    kind, api = BACKENDS[base]
+    if kind == "appscript":
+        return json.loads(urllib.request.urlopen(base + "/_dump").read())
+    out = {}
+    u, e = api.export("users"), api.export("events", 0, 2000)
+    if u["rows"]:
+        out["Claude_Users"] = [u["columns"]] + u["rows"]
+    if e["rows"]:
+        out["Claude_Compactions"] = [e["columns"]] + e["rows"]
+    return out
 
 
 def rows(base, tab):
     d = dump(base).get(tab) or [[]]
     return [dict(zip(d[0], r)) for r in d[1:]]
+
+
+def clear_tokens(base, email):
+    """What an admin does: Apps Script = clear the 'Token Hashes' cell in the sheet; server = `cckit server reset`."""
+    kind, api = BACKENDS[base]
+    if kind == "appscript":
+        urllib.request.urlopen(base + f"/_clearhash?u={email}").read()
+    else:
+        assert api.reset(email)
+
+
+def devices(base, email):
+    u = [r for r in rows(base, "Claude_Users") if r["Email"] == email][0]
+    return int(u["Devices"]) if "Devices" in u else len([h for h in u["Token Hashes"].split(",") if h])
 
 
 def run_hook(repo, tr, trigger="auto", extra_env=None, cwd=None):
@@ -490,7 +535,7 @@ def test_registration_rules(server, tmp_path, capsys):
     assert rows(server, "Claude_Users")[0]["GitHub"] == ""
     for _ in range(4):                                                          # more machines of the same developer, 5 in all
         assert cli.main(["register", str(tmp_path), "--email", ADA.upper()]) == 0      # case-insensitive: still one row
-    assert len(rows(server, "Claude_Users")) == 1 and len(rows(server, "Claude_Users")[0]["Token Hashes"].split(",")) == 5
+    assert len(rows(server, "Claude_Users")) == 1 and devices(server, ADA) == 5
     assert cli.main(["register", str(tmp_path), "--email", ADA]) == 1           # the 6th needs an admin
     assert "5 machines" in capsys.readouterr().err
 
@@ -534,7 +579,7 @@ def test_each_machine_keeps_its_own_token_and_admin_can_reset(server, tmp_path):
     assert laptop != devbox
     ev = lambda t, i: identity.post_json(server + "/exec?api=usage", {"v": 1, "email": ADA, "token": t, "event_id": i})["ok"]
     assert ev(laptop, "a") and ev(devbox, "b")
-    urllib.request.urlopen(server + f"/_clearhash?u={ADA}").read()              # an admin clears 'Token Hashes'
+    clear_tokens(server, ADA)                                                   # an admin resets the developer's machines
     assert not ev(laptop, "c") and not ev(devbox, "d")
 
 
@@ -653,7 +698,7 @@ def test_exported_apps_script_files_parse(tmp_path):
 def test_api_files_never_reference_conversation_content():
     src = "".join(read(p) for p in GS_DIR.glob("*.gs"))
     for word in ("compact_summary", "custom_instructions", "prompt"):
-        assert word not in src.replace("prompts, code", "")
+        assert word not in src.replace("prompts, code", "").replace("ui.prompt", "")
 
 
 # ------------------------------------------------------------------ a deployment that wants a Google sign-in is explained, not just "failed"
@@ -686,3 +731,268 @@ def test_ping_and_register_explain_a_sign_in_page(login_page_server, tmp_path, c
     assert "Google sign-in" in capsys.readouterr().out
     assert cli.main(["register", str(tmp_path), "--email", ADA]) == 1
     assert "Google sign-in" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ `cckit server`: things only the standalone server has
+def new_api(tmp_path, **kw):
+    kw.setdefault("github_check", fake_github)
+    return usage_server.UsageApi(str(tmp_path / "u.db"), KEY, [DOM], admin_token=kw.pop("admin_token", ADMIN), **kw)
+
+
+def http_get(url, token=None):
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token} if token else {})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+@pytest.fixture
+def pyserver(tmp_path):
+    import threading
+    api = new_api(tmp_path)
+    srv = usage_server.make_server("127.0.0.1", 0, api)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}", api
+    srv.shutdown()
+    srv.server_close()
+
+
+def seed(base, n_events, email=ADA):
+    tok = identity.post_json(base + "/?api=register", {"email": email, "team_key": KEY, "github": "octocat"})["token"]
+    for i in range(n_events):
+        assert identity.post_json(base + "/?api=usage", {"email": email, "token": tok, "event_id": f"ev{i}", "model": "m", "context_tokens": 10})["ok"]
+    return tok
+
+
+def test_export_needs_the_admin_token_and_never_shows_token_hashes(pyserver):
+    base, api = pyserver
+    tok = seed(base, 2)
+    assert http_get(base + "/?api=export&table=events")[0] == 401
+    assert http_get(base + "/?api=export&table=events", "wrong")[0] == 401
+    code, d = http_get(base + "/?api=export&table=users", ADMIN)
+    assert code == 200 and d["columns"][4] == "Devices" and d["rows"][0][4] == 1
+    assert tok not in json.dumps(d) and sha_of(tok) not in json.dumps(d)
+    assert http_get(base + "/?api=export&table=nope", ADMIN)[1]["ok"] is False
+
+
+def sha_of(t):
+    import hashlib
+    return hashlib.sha256(t.encode()).hexdigest()
+
+
+def test_export_is_disabled_without_an_admin_token(tmp_path):
+    api = new_api(tmp_path, admin_token="")
+    assert api.handle("GET", {"api": ["export"]}, b"", "Bearer ")[0] == 403
+    assert api.handle("GET", {"api": ["export"]}, b"", "")[0] == 403
+
+
+def test_export_pages_by_cursor_without_gaps_or_repeats(pyserver):
+    base, _ = pyserver
+    seed(base, 7)
+    seen, after = [], 0
+    for _ in range(10):
+        _, d = http_get(base + f"/?api=export&table=events&after={after}&limit=3", ADMIN)
+        seen += [r[1] for r in d["rows"]]
+        after = d["last_id"]
+        if not d["more"]:
+            break
+    assert seen == [f"ev{i}" for i in range(7)]
+    assert http_get(base + f"/?api=export&table=events&after={after}", ADMIN)[1]["rows"] == []
+
+
+def test_data_survives_a_restart(tmp_path):
+    a = new_api(tmp_path)
+    tok = a.register({"email": ADA, "team_key": KEY})["token"]
+    b = new_api(tmp_path)                                        # a new process on the same file
+    assert b.usage({"email": ADA, "token": tok, "event_id": "x"}) == {"ok": True}
+
+
+def test_registration_limit_is_per_hour_and_refused_attempts_count(tmp_path):
+    t = [1_000_000.0]
+    api = new_api(tmp_path, register_per_hour=2, clock=lambda: t[0])
+    assert api.register({"email": "a.one@tigeranalytics.com", "team_key": KEY})["ok"]
+    assert api.register({"email": "b.two@tigeranalytics.com", "team_key": KEY})["ok"]
+    with pytest.raises(usage_server.ApiError, match="too many registrations"):
+        api.register({"email": "c.three@tigeranalytics.com", "team_key": KEY})
+    t[0] += 3700                                                  # next hour
+    assert api.register({"email": "c.three@tigeranalytics.com", "team_key": KEY})["ok"]
+
+
+def test_concurrent_events_are_all_stored(pyserver):
+    import threading
+    base, api = pyserver
+    tok = identity.post_json(base + "/?api=register", {"email": ADA, "team_key": KEY})["token"]
+    results = []
+
+    def send(i):
+        results.append(identity.post_json(base + "/?api=usage", {"email": ADA, "token": tok, "event_id": f"c{i}"})["ok"])
+
+    threads = [threading.Thread(target=send, args=(i,)) for i in range(30)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert results == [True] * 30 and len(api.export("events", 0, 100)["rows"]) == 30
+    assert api.export("users")["rows"][0][7] == 30
+
+
+@pytest.mark.parametrize("body,fragment", [(b"not json", "JSON"), (b"[1,2]", "JSON object"), (b"\xff\xfe", "JSON"), (b"x" * 7000, "too large")])
+def test_bad_bodies_get_a_clear_answer(tmp_path, body, fragment):
+    api = new_api(tmp_path)
+    code, d = api.handle("POST", {"api": ["register"]}, body)
+    assert code == 200 and d["ok"] is False and fragment in d["error"]
+
+
+def test_huge_body_is_refused_without_being_read(pyserver):
+    base, _ = pyserver
+    r = identity.post_json(base + "/?api=usage", {"email": ADA, "token": "x", "event_id": "e", "tools": "x" * 70000})
+    assert r["ok"] is False and "too large" in r["error"]
+
+
+def test_unexpected_errors_never_leak_internals(tmp_path):
+    api = new_api(tmp_path)
+    api.register = lambda b: 1 / 0
+    code, d = api.handle("POST", {"api": ["register"]}, b"{}")
+    assert (code, d) == (500, {"ok": False, "error": "server error"})
+
+
+def test_a_switched_off_developer_is_refused_everywhere(pyserver, capsys, monkeypatch, tmp_path):
+    base, api = pyserver
+    tok = seed(base, 1)
+    assert api.set_active(ADA, False)
+    assert "switched off" in identity.post_json(base + "/?api=usage", {"email": ADA, "token": tok, "event_id": "z"})["error"]
+    assert "switched off" in identity.post_json(base + "/?api=register", {"email": ADA, "team_key": KEY})["error"]
+    assert api.set_active(ADA, True)
+    assert identity.post_json(base + "/?api=usage", {"email": ADA, "token": tok, "event_id": "z"})["ok"] is True
+    assert not api.set_active("nobody@tigeranalytics.com", False)
+
+
+def test_server_cli_commands(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "cli.db")
+    monkeypatch.setenv("CCKIT_DB", db)
+    monkeypatch.setenv("CCKIT_TEAM_KEY", KEY)
+    api = usage_server.UsageApi(db, KEY, [DOM], github_check=fake_github)
+    api.register({"email": ADA, "team_key": KEY, "github": "octocat"})
+    assert cli.main(["server", "users"]) == 0 and ADA in capsys.readouterr().out
+    assert cli.main(["server", "deactivate", ADA]) == 0 and api.export("users")["rows"][0][5] == "No"
+    assert cli.main(["server", "activate", ADA]) == 0 and api.export("users")["rows"][0][5] == "Yes"
+    assert cli.main(["server", "reset", ADA]) == 0 and api.export("users")["rows"][0][4] == 0
+    assert cli.main(["server", "reset", "ghost@tigeranalytics.com"]) == 1
+    capsys.readouterr()
+    assert cli.main(["server", "keys"]) == 0
+    out = capsys.readouterr().out
+    assert "CCKIT_TEAM_KEY=" in out and "CCKIT_ADMIN_TOKEN=" in out
+
+
+def test_server_run_needs_a_team_key(monkeypatch, capsys, tmp_path):
+    monkeypatch.delenv("CCKIT_TEAM_KEY", raising=False)
+    monkeypatch.setenv("CCKIT_DB", str(tmp_path / "x.db"))
+    assert cli.main(["server", "run"]) == 2
+    assert "CCKIT_TEAM_KEY" in capsys.readouterr().err
+
+
+def test_server_logs_nothing_from_requests(pyserver, capfd):
+    base, _ = pyserver
+    seed(base, 1)
+    out = capfd.readouterr()
+    assert "token" not in out.err and "event_id" not in out.err and "usage" not in out.err
+
+
+def test_client_registers_against_the_standalone_server_with_the_default_urls(pyserver, tmp_path):
+    base, _ = pyserver
+    write_cfg(tmp_path, endpoint=base + "/")                       # any path works: routing is by ?api=
+    assert cli.main(["register", str(tmp_path), "--email", ADA]) == 0
+    assert identity.get_identity(base + "/")["email"] == ADA
+    assert cli.main(["whoami", str(tmp_path), "--check"]) == 0
+
+
+# ------------------------------------------------------------------ Pull.gs: the sheet copies rows from the server (Node + a real server)
+PULL_SIM = Path(__file__).parent / "sim" / "puller_sim.js"
+
+
+def pull(tmp_path, base, action="pull", token=ADMIN, answers=None, state="sheet", rewrite=None):
+    args = [NODE, str(PULL_SIM), str(GS_DIR), str(tmp_path / f"{state}_state.json"), base, token, action] + ([json.dumps(answers)] if answers is not None else [])
+    env = {**os.environ, "PATH": REAL_PATH, **({"PULL_SIM_REWRITE": rewrite} if rewrite else {})}      # the sim shells out to curl
+    p = subprocess.run(args, capture_output=True, text=True, timeout=120, env=env)
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(not NODE, reason="needs node")
+def test_pull_copies_new_rows_once_and_only_new_rows(pyserver, tmp_path):
+    base, api = pyserver
+    tok = seed(base, 3)
+    identity.post_json(base + "/?api=usage", {"email": ADA, "token": tok, "event_id": "fx", "model": "=SUM(A1)", "project": "+cmd"})
+    r = pull(tmp_path, base)
+    assert r.get("error") is None and r["result"] == {"events": 4, "users": 1}
+    ev = r["sheets"]["Claude_Compactions"]
+    assert ev[0][:3] == ["Received At", "Event ID", "Email"] and [row[1] for row in ev[1:]] == ["ev0", "ev1", "ev2", "fx"]
+    assert ev[4][5] == "'=SUM(A1)" and ev[4][25] == "'+cmd"                                # formulas neutralised
+    assert r["sheets"]["Claude_Users"][1][0] == ADA and r["props"]["USAGE_PULL_AFTER"] == "4"
+    assert pull(tmp_path, base)["result"] == {"events": 0, "users": 1}                   # nothing new: nothing copied twice
+    identity.post_json(base + "/?api=usage", {"email": ADA, "token": tok, "event_id": "ev9"})
+    r = pull(tmp_path, base)
+    assert r["result"]["events"] == 1 and [row[1] for row in r["sheets"]["Claude_Compactions"][1:]] == ["ev0", "ev1", "ev2", "fx", "ev9"]
+    assert len(r["sheets"]["Claude_Users"]) == 2                                          # header + one developer: replaced, not appended
+    assert tok not in json.dumps(r["sheets"]) and sha_of(tok) not in json.dumps(r["sheets"])
+
+
+@pytest.mark.skipif(not NODE, reason="needs node")
+def test_pull_can_start_over_without_duplicating(pyserver, tmp_path):
+    base, _ = pyserver
+    seed(base, 2)
+    assert pull(tmp_path, base)["result"]["events"] == 2
+    again = pull(tmp_path, base, "scratch")
+    assert again["result"]["events"] == 2 and [row[1] for row in again["sheets"]["Claude_Compactions"][1:]] == ["ev0", "ev1"]
+
+
+@pytest.mark.skipif(not NODE, reason="needs node")
+def test_pull_says_what_is_wrong_when_the_token_is_wrong_or_export_is_off(pyserver, tmp_path):
+    base, _ = pyserver
+    assert "rejected the admin token" in pull(tmp_path, base, token="wrong")["error"]
+    import threading
+    srv = usage_server.make_server("127.0.0.1", 0, usage_server.UsageApi(str(tmp_path / "n.db"), KEY, [DOM], admin_token=""))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        assert "not enabled" in pull(tmp_path, f"http://127.0.0.1:{srv.server_address[1]}", token="x", state="noexport")["error"]
+    finally:
+        srv.shutdown()
+    assert "not set up" in pull(tmp_path, "", token="", state="unset")["error"]
+
+
+@pytest.mark.skipif(not NODE, reason="needs node")
+def test_setup_refuses_http_can_be_cancelled_and_installs_exactly_one_trigger(pyserver, tmp_path):
+    base, _ = pyserver
+    seed(base, 2)
+    rw = f"https://usage.test|{base}"
+    clean = lambda state: {"state": state, "rewrite": rw}
+    # the setup flow must not rely on pre-set properties: run it from an empty state
+    bad = pull(tmp_path, "", token="", action="setup", answers=["http://insecure.example.com", ADMIN], **clean("a"))
+    assert any("must start with https://" in m for m in bad["alerts"]) and bad["triggers"] == [] and "USAGE_ADMIN_TOKEN" not in bad["props"]
+    cancel = pull(tmp_path, "", token="", action="setup", answers=[None], **clean("b"))
+    assert cancel["triggers"] == [] and cancel["props"] == {}
+    ok = pull(tmp_path, "", token="", action="setup", answers=["https://usage.test/?x=1#y", ADMIN], **clean("c"))
+    assert ok.get("error") is None and ok["props"]["USAGE_SERVER_URL"] == "https://usage.test" and ok["props"]["USAGE_ADMIN_TOKEN"] == ADMIN
+    assert ok["triggers"] == [{"fn": "pullClaudeUsage", "every": 15}] and "2 compactions, 1 developers" in ok["alerts"][-1]
+    twice = pull(tmp_path, "", token="", action="setup", answers=["https://usage.test", ADMIN], **clean("c"))
+    assert twice["triggers"] == [{"fn": "pullClaudeUsage", "every": 15}]                   # replaced, not duplicated
+    assert len(twice["sheets"]["Claude_Compactions"]) == 3 and twice["props"]["USAGE_PULL_AFTER"] == "2"   # same server: cursor kept, header + 2 rows, no repeats
+    assert "1 compactions" not in twice["alerts"][-1] and "0 compactions" in twice["alerts"][-1]
+
+
+# ------------------------------------------------------------------ api export modes
+def test_api_export_puller_mode_writes_only_pull_gs(tmp_path):
+    out = tmp_path / "gs"
+    assert cli.main(["api", "export", "--mode", "puller", "--out", str(out)]) == 0
+    assert [p.name for p in out.iterdir()] == ["Pull.gs"]
+    assert cli.main(["api", "export", "--mode", "puller", "--check", "--out", str(out)]) == 0
+    (out / "Pull.gs").write_text("//x")
+    assert cli.main(["api", "export", "--mode", "puller", "--check", "--out", str(out)]) == 1
+
+
+@pytest.mark.skipif(not NODE, reason="needs node")
+def test_pull_gs_parses_and_has_no_web_entry_point(tmp_path):
+    js = tmp_path / "p.js"
+    js.write_text(read(GS_DIR / "Pull.gs"))
+    assert subprocess.run([NODE, "--check", str(js)], capture_output=True).returncode == 0
+    assert "doPost" not in read(GS_DIR / "Pull.gs") and "doGet" not in read(GS_DIR / "Pull.gs")      # nothing public is exposed

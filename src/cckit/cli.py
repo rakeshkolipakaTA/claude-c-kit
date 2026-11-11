@@ -1,14 +1,15 @@
-"""Command line: cckit init | register | whoami | api export | doctor | report | run | print-settings."""
+"""Command line: cckit init | register | whoami | api export | server | doctor | report | run | print-settings."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import secrets
 import shutil
 import sys
 from pathlib import Path
 
-from . import __version__, apply, config, doctor, identity, render, report
+from . import __version__, apply, config, doctor, identity, render, report, server
 
 
 def _root(args) -> Path:
@@ -105,7 +106,7 @@ def cmd_register(args) -> int:
 def cmd_api(args) -> int:
     if args.api_cmd != "export":
         return 2
-    files = render.build_apps_script(standalone=args.standalone)
+    files = render.build_apps_script(standalone=args.standalone, mode=args.mode)
     out = Path(args.out)
     if args.check:
         bad = [n for n, text in files.items() if not (out / n).exists() or (out / n).read_text(encoding="utf-8") != text]
@@ -117,9 +118,56 @@ def cmd_api(args) -> int:
     for n, text in files.items():
         (out / n).write_text(text, encoding="utf-8", newline="\n")
         print(f"wrote {out / n}")
-    print("\nPaste these into the Apps Script project that owns the sheet (or clasp push), run setupUsageApi once,\n"
-          "then Deploy > New deployment > Web app: Execute as Me, access Anyone. Put the /exec URL in cckit.toml [telemetry] endpoint.")
+    if args.mode == "puller":
+        print("\nPaste Pull.gs into the Apps Script project that owns the sheet, run setupUsagePull once (it asks for the server URL and admin token\n"
+              "and installs a 15-minute trigger). No web app deployment is needed.")
+    else:
+        print("\nPaste these into the Apps Script project that owns the sheet (or clasp push), run setupUsageApi once,\n"
+              "then Deploy > New deployment > Web app: Execute as Me, access Anyone. Put the /exec URL in cckit.toml [telemetry] endpoint.")
     return 0
+
+
+def _usage_api(args, need_key: bool = True) -> "server.UsageApi":
+    env = os.environ
+    domains = (args.domains or env.get("CCKIT_ALLOWED_DOMAINS") or "tigeranalytics.com").split(",")
+    key = env.get("CCKIT_TEAM_KEY", "")
+    if need_key and not key:
+        raise ValueError("set CCKIT_TEAM_KEY (the join code developers use; `cckit server keys` makes one)")
+    return server.UsageApi(args.db or env.get("CCKIT_DB") or "usage.db", key or "-", domains, env.get("CCKIT_ADMIN_TOKEN", ""))
+
+
+def cmd_server(args) -> int:
+    c = args.server_cmd
+    if c == "keys":
+        print(f"CCKIT_TEAM_KEY={secrets.token_hex(8)}\nCCKIT_ADMIN_TOKEN={secrets.token_hex(24)}")
+        print("\nSet both as environment variables on the host (never in a file in the repo). Developers get the team key; the admin token is for the sheet puller only.", file=sys.stderr)
+        return 0
+    try:
+        api = _usage_api(args, need_key=(c == "run"))
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if c == "run":
+        host = args.host or os.environ.get("CCKIT_HOST") or "127.0.0.1"
+        port = args.port or int(os.environ.get("PORT") or 8080)
+        srv = server.make_server(host, port, api)
+        print(f"cckit usage API listening on http://{host}:{port}  (db: {api.db_path}; domains: {', '.join(api.domains)})")
+        print("export for the sheet: " + ("enabled" if api.admin_token else "DISABLED (set CCKIT_ADMIN_TOKEN)") + ". Put HTTPS in front of this port: clients refuse plain http.", flush=True)
+        try:
+            srv.serve_forever()
+        except KeyboardInterrupt:
+            print("\nstopped")
+        return 0
+    if c == "users":
+        rows = api.export("users")["rows"]
+        print(f"{'email':<42} {'github':<20} {'devices':>7} {'active':<6} {'compactions':>11}  last seen")
+        for r in rows:
+            print(f"{r[0]:<42} {r[1]:<20} {r[4]:>7} {r[5]:<6} {r[7]:>11}  {r[6]}")
+        print(f"\n{len(rows)} user(s)")
+        return 0
+    done = {"deactivate": lambda: api.set_active(args.email, False), "activate": lambda: api.set_active(args.email, True), "reset": lambda: api.reset(args.email)}[c]()
+    print(f"{c}: {args.email}" if done else f"no such user: {args.email}")
+    return 0 if done else 1
 
 
 def cmd_whoami(args) -> int:
@@ -271,9 +319,29 @@ def main(argv: list[str] | None = None) -> int:
     asub = p.add_subparsers(dest="api_cmd", required=True)
     pe = asub.add_parser("export", help="write Api.gs, Register.gs and Usage.gs")
     pe.add_argument("--out", default=".cckit/apps-script", help="folder to write (default .cckit/apps-script)")
+    pe.add_argument("--mode", choices=["direct", "puller"], default="direct",
+                    help="direct: Apps Script hosts both APIs (needs a deployment with access Anyone). puller: only Pull.gs, which copies rows from a `cckit server` into the sheet")
     pe.add_argument("--standalone", action="store_true", help="also write Standalone.gs (doGet and menu) for a project that is not the Access Hub")
     pe.add_argument("--check", action="store_true", help="only compare the folder with this version of cckit; exit 1 when it differs")
     p.set_defaults(fn=cmd_api)
+
+    p = sub.add_parser("server", help="run the register and usage APIs as a standalone public service (when Apps Script cannot be public)")
+    ssub = p.add_subparsers(dest="server_cmd", required=True)
+    pr = ssub.add_parser("run", help="start the server (config by environment: CCKIT_TEAM_KEY, CCKIT_ADMIN_TOKEN, CCKIT_ALLOWED_DOMAINS, CCKIT_DB, PORT)")
+    pr.add_argument("--host", help="default 127.0.0.1 (use 0.0.0.0 in a container)")
+    pr.add_argument("--port", type=int, help="default $PORT or 8080")
+    ssub.add_parser("keys", help="print a fresh team key and admin token")
+    for name, h in (("users", "list registered developers"), ("deactivate", "switch a developer off"), ("activate", "switch a developer on"),
+                    ("reset", "forget a developer's machine tokens (they register again at the next session)")):
+        sp = ssub.add_parser(name, help=h)
+        if name != "users":
+            sp.add_argument("email")
+    for sp in ssub.choices.values():
+        if sp.prog.endswith(" keys"):
+            continue
+        sp.add_argument("--db", help="SQLite file (default $CCKIT_DB or usage.db)")
+        sp.add_argument("--domains", help="allowed e-mail domains, comma separated (default $CCKIT_ALLOWED_DOMAINS or tigeranalytics.com)")
+    p.set_defaults(fn=cmd_server)
 
     p = sub.add_parser("whoami", help="show the telemetry setting and who this machine is registered as")
     common(p)

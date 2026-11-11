@@ -261,9 +261,12 @@ def build_mcp_profiles(cfg: dict) -> dict[str, str]:
 APPS_SCRIPT_FILES = ("Api.gs", "Register.gs", "Usage.gs")
 
 
-def build_apps_script(standalone: bool = False) -> dict[str, str]:
-    """The two APIs (register, usage) as Apps Script files. Paste or `clasp push` them into the project that owns the sheet."""
-    names = APPS_SCRIPT_FILES + (("Standalone.gs",) if standalone else ())
+def build_apps_script(standalone: bool = False, mode: str = "direct") -> dict[str, str]:
+    """Apps Script files. direct: the two APIs (register, usage) hosted by Apps Script. puller: Pull.gs, which copies rows from a `cckit server`."""
+    if mode == "puller":
+        names: tuple = ("Pull.gs",)
+    else:
+        names = APPS_SCRIPT_FILES + (("Standalone.gs",) if standalone else ())
     return {n: resources.files("cckit").joinpath("assets", "apps_script", n).read_text(encoding="utf-8") for n in names}
 
 

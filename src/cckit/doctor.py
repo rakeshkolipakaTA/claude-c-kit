@@ -190,7 +190,7 @@ def run(root: Path, check_claude: bool = True) -> Report:
     # 5b. compaction reporting
     tel = cfg["telemetry"]
     if tel["enabled"] and not tel["endpoint"]:
-        r.add("warn", "[telemetry] is enabled but endpoint is empty, so nothing is reported. Deploy the Usage API (DEPLOY.md v12) and paste its URL.")
+        r.add("warn", "[telemetry] is enabled but endpoint is empty, so nothing is reported. Host the usage server (deploy/README.md in claude-cost-kit; or the Apps Script APIs if your organisation allows a public deployment) and paste its URL.")
     elif config.telemetry_active(cfg):
         if tel["auto_register"] and not tel["team_key"]:
             r.add("warn", "[telemetry] auto_register needs team_key: without it developers cannot be registered automatically")
