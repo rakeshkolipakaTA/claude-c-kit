@@ -21,6 +21,8 @@ effort = "high"               # low | medium | high | xhigh  (settings key effor
 subagent = "haiku"            # model for subagents that do not pick their own (env CLAUDE_CODE_SUBAGENT_MODEL)
 subagent_force = false        # true = every subagent uses the model above, even if its file says otherwise
 block_opus_subagents = true   # deny rule Agent(model:opus): subagents may not be started on Opus
+opus_reminder = true          # while an Opus model is in use, every reply ends with a one-line "Model tip:" saying whether the task needed Opus
+                              # (a UserPromptSubmit hook adds the instruction; nothing is added on other models)
 
 [context]
 auto_compact_window = 200000  # tokens, 100000..1000000 (env CLAUDE_CODE_AUTO_COMPACT_WINDOW)
@@ -106,11 +108,11 @@ max_effort_level = "high"
 
 # Optional: price per million tokens, so `cckit report` and usage_report.py can estimate cost. Match by a word in the model name.
 # Use the rates of YOUR agreement; none are built in because they change.
-# [prices.sonnet]
-# input = 3.0
-# output = 15.0
-# cache_read = 0.3
-# cache_write = 3.75
+# [prices.sonnet]              # USD per million tokens; the key is a word of the model name. Example: Sonnet 5.5 list prices, Nov 2026
+# input = 2.0
+# output = 10.0
+# cache_read = 0.10
+# cache_write = 2.50           # 5-minute cache writes cost 1.25x the input rate
 '''
 
 EFFORTS = ("low", "medium", "high", "xhigh")
@@ -204,7 +206,7 @@ def validate(cfg: dict) -> list[str]:
         errs.append(f"[model] effort must be one of {', '.join(EFFORTS)} ('max' cannot be set in settings.json)")
     if not isinstance(m.get("subagent"), str) or not m["subagent"].strip():
         errs.append("[model] subagent must be a non-empty string")
-    for k in ("subagent_force", "block_opus_subagents"):
+    for k in ("subagent_force", "block_opus_subagents", "opus_reminder"):
         if not isinstance(m.get(k), bool):
             errs.append(f"[model] {k} must be true or false")
     w = c.get("auto_compact_window")

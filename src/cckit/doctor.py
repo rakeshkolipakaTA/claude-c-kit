@@ -176,6 +176,8 @@ def run(root: Path, check_claude: bool = True) -> Report:
     scripts = []
     if cfg["hooks"]["trim_test_output"]:
         scripts.append(render.TRIM_SCRIPT)
+    if cfg["model"]["opus_reminder"]:
+        scripts.append(render.OPUS_SCRIPT)
     if cfg["monitoring"]["statusline"]:
         scripts.append(render.STATUS_SCRIPT)
     if config.telemetry_active(cfg):

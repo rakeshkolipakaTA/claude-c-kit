@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -106,6 +107,7 @@ def test_optional_switches():
     cfg["usage"]["log"] = False
     cfg["usage"]["scripts"] = False
     cfg["telemetry"]["enabled"] = False
+    cfg["model"]["opus_reminder"] = False
     s = render.build_settings(cfg)
     assert "CLAUDE_CODE_DISABLE_1M_CONTEXT" not in s["env"]
     assert s["env"]["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"] == "1"
@@ -455,3 +457,73 @@ def test_python_dash_m_cckit_works(tmp_path):
     src = str(Path(__file__).resolve().parents[1] / "src")
     r = subprocess.run([sys.executable, "-m", "cckit", "--version"], capture_output=True, text=True, env={**os.environ, "PYTHONPATH": src})
     assert r.returncode == 0 and r.stdout.startswith("cckit ")
+
+
+# ------------------------------------------------------------------ the Opus reminder
+def opus_run(repo, transcript=None, env=None, cwd=None):
+    import subprocess, sys
+    payload = {"hook_event_name": "UserPromptSubmit", "cwd": str(cwd or repo), "prompt": "do the thing"}
+    if transcript:
+        payload["transcript_path"] = str(transcript)
+    p = subprocess.run([sys.executable, str(repo / ".claude/hooks/opus_reminder.py")], input=json.dumps(payload), capture_output=True, text=True,
+                       env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo), **(env or {})}, timeout=30)
+    assert p.returncode == 0 and p.stderr == ""
+    return p.stdout
+
+
+def model_line(model, side=False):
+    return json.dumps({"type": "assistant", "isSidechain": side, "message": {"id": "m" + model, "model": model, "usage": {"input_tokens": 1, "output_tokens": 1}}})
+
+
+def test_reminder_hook_is_installed_by_default_and_listed_in_claude_md(repo):
+    apply.init(repo)
+    s = json.loads(read(repo / ".claude/settings.json"))
+    assert s["hooks"]["UserPromptSubmit"][0]["hooks"][0]["args"] == ["${CLAUDE_PROJECT_DIR}/.claude/hooks/opus_reminder.py"]
+    assert (repo / ".claude/hooks/opus_reminder.py").exists() and os.access(repo / ".claude/hooks/opus_reminder.py", os.X_OK)
+    assert 'line starting "Model tip:"' in read(repo / "CLAUDE.md")
+
+
+def test_reminder_only_on_opus(repo, tmp_path):
+    apply.init(repo)
+    t = tmp_path / "t.jsonl"
+    t.write_text(model_line("claude-sonnet-5-5") + "\n" + model_line("claude-opus-5-5") + "\n")
+    out = json.loads(opus_run(repo, t))["hookSpecificOutput"]
+    assert out["hookEventName"] == "UserPromptSubmit" and "Model tip:" in out["additionalContext"] and "/model sonnet" in out["additionalContext"]
+    t.write_text(model_line("claude-opus-5-5") + "\n" + model_line("claude-sonnet-5-5") + "\n")           # switched to Sonnet: silent and free
+    assert opus_run(repo, t) == ""
+    t.write_text(model_line("claude-opus-5-5") + "\n" + model_line("claude-opus-5-5", side=True).replace("opus", "haiku") + "\n")   # a subagent's model does not count
+    assert opus_run(repo, t) != ""
+
+
+def test_reminder_before_the_first_response_uses_the_configured_model(repo, tmp_path, monkeypatch):
+    apply.init(repo)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    assert opus_run(repo) == ""                                          # settings.json says sonnet
+    assert "Model tip:" in opus_run(repo, env={"ANTHROPIC_MODEL": "opus"})
+    s = json.loads(read(repo / ".claude/settings.json"))
+    s["model"] = "claude-opus-5-5"
+    (repo / ".claude/settings.json").write_text(json.dumps(s))
+    assert "Model tip:" in opus_run(repo, tmp_path / "missing.jsonl")
+
+
+def test_reminder_can_be_switched_off(repo, tmp_path):
+    apply.init(repo)
+    t = tmp_path / "t.jsonl"
+    t.write_text(model_line("claude-opus-5-5") + "\n")
+    assert opus_run(repo, t, env={"CCKIT_OPUS_REMINDER": "off"}) == ""
+    (repo / "cckit.toml").write_text("[model]\nopus_reminder = false\n")
+    apply.init(repo)
+    s = json.loads(read(repo / ".claude/settings.json"))
+    assert "UserPromptSubmit" not in s.get("hooks", {}) and not (repo / ".claude/hooks/opus_reminder.py").exists()
+    assert "Model tip:" not in read(repo / "CLAUDE.md")
+
+
+def test_reminder_survives_garbage_and_keeps_users_own_prompt_hooks(repo):
+    import subprocess, sys
+    (repo / ".claude").mkdir()
+    (repo / ".claude/settings.json").write_text(json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}}))
+    apply.init(repo)
+    entries = json.loads(read(repo / ".claude/settings.json"))["hooks"]["UserPromptSubmit"]
+    assert len(entries) == 2 and any("echo mine" in json.dumps(e) for e in entries)
+    p = subprocess.run([sys.executable, str(repo / ".claude/hooks/opus_reminder.py")], input="not json", capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0 and p.stdout == "" and p.stderr == ""

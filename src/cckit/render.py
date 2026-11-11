@@ -8,9 +8,10 @@ from . import config
 
 MARK_BEGIN = "<!-- cckit:begin - managed by cckit. Edit cckit.toml and run `cckit init`; text between the markers is rewritten -->"
 MARK_END = "<!-- cckit:end -->"
-HOOK_MARKERS = ("trim_output.py", "compact_report.py", "log_token_usage.py")      # identify the hook entries cckit owns inside settings.json
+HOOK_MARKERS = ("trim_output.py", "compact_report.py", "log_token_usage.py", "opus_reminder.py")      # identify the hook entries cckit owns inside settings.json
 COMPACT_SCRIPT = ".claude/hooks/compact_report.py"
 LOG_SCRIPT = ".claude/hooks/log_token_usage.py"
+OPUS_SCRIPT = ".claude/hooks/opus_reminder.py"
 REPORT_SCRIPT = ".claude/scripts/usage_report.py"
 USAGE_COMMAND = ".claude/commands/usage.md"
 GITIGNORE_BEGIN = "# cckit:begin - managed by cckit (local usage log); edit cckit.toml and run `cckit init`"
@@ -85,6 +86,11 @@ def stop_hook_on(cfg: dict) -> bool:
     return bool(cfg["usage"]["log"] or config.stop_report_active(cfg))
 
 
+def opus_hook_entry(cfg: dict) -> dict:
+    """UserPromptSubmit: while Opus is in use, adds the one-line model-tip instruction. Prints nothing on any other model."""
+    return {"hooks": [{"type": "command", "command": cfg["hooks"]["python"], "args": ["${CLAUDE_PROJECT_DIR}/" + OPUS_SCRIPT], "timeout": 10}]}
+
+
 def log_hook_entry(cfg: dict) -> dict:
     """Stop / SubagentStop: append token counts to the local CSV. Synchronous on purpose: a background hook is killed when a headless run
     (`claude -p`, the SDK) exits right after the last response, and this one only reads the new transcript lines (milliseconds). Prints nothing."""
@@ -107,6 +113,8 @@ def build_settings(cfg: dict) -> dict:
     hooks: dict = {}
     if cfg["hooks"]["trim_test_output"]:
         hooks["PreToolUse"] = [hook_entry(cfg)]
+    if cfg["model"]["opus_reminder"]:
+        hooks["UserPromptSubmit"] = [opus_hook_entry(cfg)]
     if stop_hook_on(cfg):
         hooks["Stop"] = [log_hook_entry(cfg)]
         hooks["SubagentStop"] = [log_hook_entry(cfg)]
@@ -131,6 +139,10 @@ def is_cckit_hook(entry: dict) -> bool:
 
 
 # ----------------------------------------------------------------------------- hook scripts
+def render_opus_script(cfg: dict) -> str:
+    return asset("opus_reminder.py.tpl")
+
+
 def render_trim_script(cfg: dict) -> str:
     return asset("trim_output.py.tpl").replace("__TAIL_LINES__", str(cfg["hooks"]["tail_lines"]))
 
@@ -220,6 +232,9 @@ def build_claude_md_block(cfg: dict) -> str:
 - Run only the tests that cover the change. Run the full suite once, at the end.
 - If an approach fails twice, stop and ask instead of trying a third variation.
 - Between unrelated tasks run `/clear`. At a natural break in a long task run `/compact`.
+"""
+    if cfg["model"]["opus_reminder"]:
+        body += """- If you are running on an Opus model, end every reply with one line starting "Model tip:" that says whether this task needed Opus; if a cheaper model would have done, name it and the `/model` command.
 """
     if cfg["usage"]["scripts"]:
         body += f"""- For tokens, cost or context used so far, run `{cfg["hooks"]["python"]} {REPORT_SCRIPT}` (add `--session all --days 7` for the week). Do not estimate them yourself.

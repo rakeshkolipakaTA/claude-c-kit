@@ -21,7 +21,7 @@ from . import config, render
 MANIFEST = ".cckit/manifest.json"
 SETTINGS = ".claude/settings.json"
 CLAUDE_MD = "CLAUDE.md"
-EXECUTABLE = {render.TRIM_SCRIPT, render.STATUS_SCRIPT, render.COMPACT_SCRIPT, render.LOG_SCRIPT, render.REPORT_SCRIPT}
+EXECUTABLE = {render.TRIM_SCRIPT, render.STATUS_SCRIPT, render.COMPACT_SCRIPT, render.LOG_SCRIPT, render.REPORT_SCRIPT, render.OPUS_SCRIPT}
 
 
 def claude_md_path(root: Path) -> Path:
@@ -55,6 +55,8 @@ def desired_files(cfg: dict) -> dict[str, str]:
     files[".cckit/README.md"] = render.build_readme(cfg)
     if cfg["hooks"]["trim_test_output"]:
         files[render.TRIM_SCRIPT] = render.render_trim_script(cfg)
+    if cfg["model"]["opus_reminder"]:
+        files[render.OPUS_SCRIPT] = render.render_opus_script(cfg)
     if cfg["monitoring"]["statusline"]:
         files[render.STATUS_SCRIPT] = render.render_statusline_script(cfg)
     if config.telemetry_active(cfg):
