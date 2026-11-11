@@ -6,5 +6,5 @@ import pytest
 @pytest.fixture(autouse=True)
 def _private_identity(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("CCKIT_IDENTITY_FILE", str(tmp_path_factory.mktemp("identity") / "identity.json"))
-    for k in ("CCKIT_TEAM_KEY", "CCKIT_EMAIL", "CCKIT_GITHUB", "CCKIT_TOKEN"):
+    for k in ("CCKIT_TEAM_KEY", "CCKIT_EMAIL", "CCKIT_GITHUB", "CCKIT_TOKEN", "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"):
         monkeypatch.delenv(k, raising=False)

@@ -7,7 +7,7 @@ SessionStart  If this machine is not registered yet, take the developer's compan
 PreCompact    Call the USAGE api with what happened: model, context size and the session's Claude metrics.
 
 Sent: company e-mail, GitHub login (optional), trigger (auto/manual), the model, reasoning effort, Claude Code version and entrypoint,
-context and window size, token totals of the session (input, output, cache read/write), request counts (main and subagents), the models
+context size and the window and percentage compaction is set to, token totals of the session (input, output, cache read/write), request counts (main and subagents), the models
 used with request counts, tool NAMES with counts, session length, how many compactions came before, OS, and (if enabled) the repo folder
 name and git branch. NEVER sent: prompts, code, file paths, tool inputs or outputs, the compaction summary or any conversation text.
 
@@ -154,6 +154,25 @@ def register(email, github):
     return False, str(d.get("error") or "registration failed")
 
 
+def env_int(name, lo, hi):
+    try:
+        v = int(os.environ.get(name, ""))
+    except ValueError:
+        return None
+    return v if lo <= v <= hi else None
+
+
+def effective_window():
+    """The context window auto-compaction works with on this machine: what Claude Code was started with (CLAUDE_CODE_AUTO_COMPACT_WINDOW, from
+    settings.json or the developer's own environment), else the value in cckit.toml. A developer who changed it is reported with their number."""
+    return env_int("CLAUDE_CODE_AUTO_COMPACT_WINDOW", 10_000, 10_000_000) or WINDOW
+
+
+def effective_pct():
+    """The percentage of that window at which auto-compaction starts (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE), or 0 when it is not set."""
+    return env_int("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", 1, 100) or 0
+
+
 def ts(s):
     try:
         return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
@@ -244,7 +263,7 @@ def report(data, ident):
         return
     m = session_metrics(data.get("transcript_path"))
     cwd = str(data.get("cwd") or "").rstrip("/\\")
-    payload = dict(m, v=1, email=ident["email"], token=ident["token"], event_id=uuid.uuid4().hex, trigger=trigger, window=WINDOW,
+    payload = dict(m, v=1, email=ident["email"], token=ident["token"], event_id=uuid.uuid4().hex, trigger=trigger, window=effective_window(), compact_pct=effective_pct(),
                    project=os.path.basename(cwd) if SEND_PROJECT else "", session=str(data.get("session_id") or ""),
                    os=platform.system(), client="cckit-hook/3")
     if not SEND_PROJECT:

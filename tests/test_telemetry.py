@@ -1612,3 +1612,20 @@ def test_unknown_duration_is_left_empty_not_zero(server, tmp_path):
     stop_hook(tmp_path, tr)
     r = stop_events(server)[0]
     assert r["Turns"] == 1 and r["Duration (s)"] == ""
+
+
+def test_the_window_in_force_is_reported_not_the_default(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    tr = rich_transcript(tmp_path / "t.jsonl")
+    run_hook(tmp_path, tr, extra_env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "60"})       # the developer changed it
+    r = rows(server, "Claude_Compactions")[0]
+    assert (r["Window"], r["Compact At %"], r["Context Tokens"], r["Context %"]) == (1000000, 60, 31700, 3.2)                       # after how many tokens it compacted
+    run_hook(tmp_path, tr, extra_env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "banana", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "0"})        # nonsense: the cckit.toml value is used
+    r2 = rows(server, "Claude_Compactions")[1]
+    assert (r2["Window"], r2["Compact At %"]) == (200000, 0)
+    t2 = tmp_path / "s.jsonl"
+    t2.write_text(msg_line("m1") + "\n")
+    stop_hook(tmp_path, t2, {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "75"})
+    s = stop_events(server)[0]
+    assert (s["Window"], s["Compact At %"]) == (500000, 75)

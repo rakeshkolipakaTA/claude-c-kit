@@ -59,7 +59,7 @@ EVENT_COLS = [
     ("Output Tokens", "output_tokens"), ("Cache Read", "cache_read"), ("Cache Write", "cache_write"), ("Cache Hit %", "cache_hit_pct"),
     ("Requests", "requests"), ("Turns", "turns"), ("Duration (s)", "duration_s"), ("Subagent Requests", "sub_requests"), ("Subagent Output", "sub_output"), ("Tool Calls", "tool_calls"),
     ("Models", "models"), ("Tools", "tools"), ("Session Minutes", "session_minutes"), ("Compactions Before", "compactions_before"),
-    ("Project", "project"), ("Branch", "branch"), ("Session", "session"), ("OS", "os"), ("Partial", "partial"), ("Client", "client"), ("Current Model", "current_model"),
+    ("Project", "project"), ("Branch", "branch"), ("Session", "session"), ("OS", "os"), ("Partial", "partial"), ("Client", "client"), ("Current Model", "current_model"), ("Compact At %", "compact_pct"),
 ]
 USER_COLS = [("Email", "email"), ("GitHub", "github"), ("Registered At", "registered_at"), ("GitHub Verified", "github_verified"),
              ("Devices", "devices"), ("Active", "active"), ("Last Seen", "last_seen"), ("Compactions", "compactions"), ("Note", "note")]
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS events(
   trig TEXT NOT NULL, model TEXT, effort TEXT, claude_version TEXT, entrypoint TEXT, context_tokens INTEGER, win INTEGER, context_pct REAL,
   input_tokens INTEGER, output_tokens INTEGER, cache_read INTEGER, cache_write INTEGER, cache_hit_pct REAL, requests INTEGER,
   sub_requests INTEGER, sub_output INTEGER, tool_calls INTEGER, models TEXT, tools TEXT, session_minutes INTEGER,
-  compactions_before INTEGER, project TEXT, branch TEXT, session TEXT, os TEXT, partial TEXT, client TEXT, turns INTEGER, duration_s INTEGER, current_model TEXT);
+  compactions_before INTEGER, project TEXT, branch TEXT, session TEXT, os TEXT, partial TEXT, client TEXT, turns INTEGER, duration_s INTEGER, current_model TEXT, compact_pct INTEGER);
 CREATE TABLE IF NOT EXISTS hits(name TEXT NOT NULL, hour INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY(name, hour));
 """
 
@@ -138,7 +138,7 @@ class UsageApi:
         with self._db() as c:
             c.executescript(SCHEMA)
             have = [r[1] for r in c.execute("PRAGMA table_info(events)")]
-            for col, typ in (("turns", "INTEGER"), ("duration_s", "INTEGER"), ("current_model", "TEXT")):      # a database from before Stop events
+            for col, typ in (("turns", "INTEGER"), ("duration_s", "INTEGER"), ("current_model", "TEXT"), ("compact_pct", "INTEGER")):      # a database from before Stop events
                 if col not in have:
                     c.execute(f"ALTER TABLE events ADD COLUMN {col} {typ}")
 
@@ -227,12 +227,12 @@ class UsageApi:
                 c.execute(
                     "INSERT INTO events(received_at, event_id, email, github, trig, model, effort, claude_version, entrypoint, context_tokens, win, context_pct,"
                     " input_tokens, output_tokens, cache_read, cache_write, cache_hit_pct, requests, sub_requests, sub_output, tool_calls, models, tools,"
-                    " session_minutes, compactions_before, project, branch, session, os, partial, client, turns, duration_s, current_model) VALUES(" + ",".join("?" * 34) + ")",
+                    " session_minutes, compactions_before, project, branch, session, os, partial, client, turns, duration_s, current_model, compact_pct) VALUES(" + ",".join("?" * 35) + ")",
                     (now_iso(), eid, email, row["github"], b.get("trigger") if b.get("trigger") in ("manual", "stop") else "auto", s("model", 60), s("effort", 20),
                      s("claude_version", 20), s("entrypoint", 30), ctx, win, pct(ctx, win), inp, out, cr, cw, pct(cr, inp + cr + cw),
                      n("requests"), n("sub_requests"), n("sub_output"), n("tool_calls"), s("models", 300), s("tools", 300),
                      n("session_minutes", 1e6), n("compactions_before", 1e5), s("project", 80), s("branch", 80), s("session", 64), s("os", 20),
-                     "Yes" if b.get("partial") else "", s("client", 40), n("turns", 1e6), (n("duration_s", 1e7) if b.get("duration_s") is not None else None), s("current_model", 60)))
+                     "Yes" if b.get("partial") else "", s("client", 40), n("turns", 1e6), (n("duration_s", 1e7) if b.get("duration_s") is not None else None), s("current_model", 60), n("compact_pct", 100)))
             except sqlite3.IntegrityError:                          # the same event_id from another process, a moment ago
                 return {"ok": True, "duplicate": True}
             c.execute("UPDATE users SET last_seen = ?, compactions = compactions + ? WHERE email = ?", (now_iso(), 0 if b.get("trigger") == "stop" else 1, email))

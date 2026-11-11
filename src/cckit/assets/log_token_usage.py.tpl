@@ -220,6 +220,25 @@ def load_identity():
     return rec if isinstance(rec, dict) and rec.get("email") and rec.get("token") else None
 
 
+def env_int(name, lo, hi):
+    try:
+        v = int(os.environ.get(name, ""))
+    except ValueError:
+        return None
+    return v if lo <= v <= hi else None
+
+
+def effective_window():
+    """The context window auto-compaction works with on this machine: what Claude Code was started with (CLAUDE_CODE_AUTO_COMPACT_WINDOW, from
+    settings.json or the developer's own environment), else the value in cckit.toml. A developer who changed it is reported with their number."""
+    return env_int("CLAUDE_CODE_AUTO_COMPACT_WINDOW", 10_000, 10_000_000) or WINDOW
+
+
+def effective_pct():
+    """The percentage of that window at which auto-compaction starts (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE), or 0 when it is not set."""
+    return env_int("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", 1, 100) or 0
+
+
 def add_pending(state, rows):
     """Add the new rows to the per-model totals waiting for the next event."""
     pend = state.get("pending") if isinstance(state.get("pending"), dict) else {}
@@ -276,7 +295,7 @@ def flush_pending(state, now, project):
                     "branch": t.get("branch", "") if SEND_PROJECT else "", "tool_calls": sum(tools.values()) if first else 0,
                     "tools": ";".join("%s:%d" % kv for kv in sorted(tools.items(), key=lambda kv: -kv[1])[:8]) if first else "",
                     "input_tokens": p["i"], "output_tokens": p["o"], "cache_read": p["cr"], "cache_write": p["cw"], "requests": p["req"], "sub_requests": p["sreq"], "sub_output": p["sout"],
-                    "context_tokens": p["ctx"], "window": WINDOW, "project": project, "session": p["session"], "os": platform.system(),
+                    "context_tokens": p["ctx"], "window": effective_window(), "compact_pct": effective_pct(), "project": project, "session": p["session"], "os": platform.system(),
                     "client": "cckit-stop/2"})
         box[-1] = {k: v for k, v in box[-1].items() if v is not None}       # an unknown duration is left out (stored as empty), never sent as 0
     state["stops"] = 0
