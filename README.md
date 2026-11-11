@@ -76,6 +76,7 @@ to a small app you deploy yourself (it must be reachable without a login, becaus
 | `GET /?api=export&table=events\|users[&format=csv]` | read the data (admin token) |
 
 - **Defaults.** `[telemetry]` is on and points at the team's usage app (`register_url` / `usage_url`), but **no team key is shipped** with the package: the key is a join code from your admin. Until a machine is registered nothing is sent, and the start-up registration hook is only installed when a `team_key` is configured. `enabled = false` switches the whole feature off (and `cckit init` says so). A `endpoint` you set yourself wins over the shipped default URLs.
+- **`cckit login`** asks for your company e-mail and the token you were given (typing is hidden), saves them in `~/.config/cckit/identity.json` (owner-only, **outside any repo**, so there is nothing to git-ignore and it works for every repo on the machine), then runs `init` in the current folder. Non-interactive: `CCKIT_TOKEN=... cckit login --email NAME@tigeranalytics.com`. The token is not checked against the server at login; use `cckit whoami --check` for a reachability test.
 - **`cckit init` in a terminal asks for the company e-mail** (the one in `git config user.email` is offered as the default; personal addresses are refused) and, if none is configured, the team key. It then offers to save the key in `cckit.toml` so teammates are registered automatically when they start Claude Code: say yes only for a **private** repository, because the key is committed with it. Without a terminal it never prompts; set `CCKIT_TEAM_KEY` or run `cckit register` later. A refused or skipped registration does not make `init` fail: the files are written.
 - **Where the URLs live: `cckit.toml`.** Either one base `endpoint` (the APIs are `<endpoint>?api=register` and `<endpoint>?api=usage`), or each API's own URL, with `endpoint` left empty:
   ```
@@ -105,6 +106,7 @@ to a small app you deploy yourself (it must be reachable without a login, becaus
 cckit init [path] [--dry-run] [--force]    create/update files; --force replaces values you changed
 cckit doctor [path]                        verify the repo; exit code 1 on failures
 cckit print-settings [path]                show the settings.json content cckit manages
+cckit login [--email E] [--token T]         save the e-mail and token you were given (home folder), then run init here
 cckit register [--email E] [--github G]    register this machine for usage reports (see [telemetry])
 cckit server export-app [--out DIR]        write the deployable usage app
 cckit server run | keys | users | deactivate|activate|reset EMAIL | dump   run and administer the usage app

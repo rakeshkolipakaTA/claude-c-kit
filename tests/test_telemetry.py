@@ -1342,3 +1342,35 @@ def test_the_managed_block_stays_short_and_tells_claude_about_the_scripts_and_th
     md = read(tmp_path / "CLAUDE.md")
     assert len(md.splitlines()) < 30
     assert "usage_report.py" in md and "Do not estimate them yourself" in md and ".claude/token_usage.csv" in md
+
+
+# ------------------------------------------------------------------ cckit login: save e-mail + token in the home folder, then init
+def test_login_saves_the_identity_outside_the_repo_and_runs_init(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert cli.main(["login", str(repo), "--email", "Ada.Lovelace@TigerAnalytics.com", "--token", "tok_ABCDEF123456"]) == 0
+    key = config.identity_key(config.load(repo)["telemetry"])
+    assert identity.get_identity(key) == {"email": ADA, "github": "", "token": "tok_ABCDEF123456"}
+    assert (repo / "cckit.toml").exists() and (repo / ".claude" / "settings.json").exists()       # init ran
+    assert "tok_ABCDEF123456" not in "".join(p.read_text(errors="ignore") for p in repo.rglob("*") if p.is_file())   # the token is nowhere in the repo
+    assert "not registered yet" not in capsys.readouterr().out                                    # init saw the login
+
+
+def test_login_refuses_a_foreign_email_and_a_bad_token(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert cli.main(["login", str(tmp_path), "--email", "ada@gmail.com", "--token", "tok_ABCDEF123456"]) == 2
+    assert "@tigeranalytics.com" in capsys.readouterr().err
+    assert cli.main(["login", str(tmp_path), "--email", ADA, "--token", "short"]) == 2
+    assert "token" in capsys.readouterr().err
+    assert not (tmp_path / "cckit.toml").exists() and not identity.identity_path().exists()      # nothing written on a refusal
+
+
+def test_login_prompts_with_hidden_token(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": ADA)
+    asked = []
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": asked.append(prompt) or "tok_ABCDEF123456")
+    assert cli.main(["login", str(tmp_path), "--no-init"]) == 0
+    assert asked and not (tmp_path / "cckit.toml").exists()                                       # --no-init: login only
+    assert identity.get_identity(config.identity_key(config.load(tmp_path)["telemetry"]))["token"] == "tok_ABCDEF123456"

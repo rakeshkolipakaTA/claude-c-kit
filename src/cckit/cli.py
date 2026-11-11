@@ -1,7 +1,8 @@
-"""Command line: cckit init | register | whoami | server | doctor | report | run | print-settings."""
+"""Command line: cckit init | login | register | whoami | server | doctor | report | run | print-settings."""
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -46,7 +47,7 @@ def cmd_init(args) -> int:
                 except (KeyboardInterrupt, EOFError):
                     print("\nSkipped. Run `cckit register` when you are ready.")
             else:
-                print("Run `cckit register` (it asks for your company e-mail and the team key), or set CCKIT_TEAM_KEY and start Claude Code here: "
+                print("Run `cckit login` (company e-mail and the token you were given), or `cckit register` (e-mail and the team key), or set CCKIT_TEAM_KEY and start Claude Code here: "
                       "it registers you from the company e-mail in your git config.")
     return 0
 
@@ -129,6 +130,58 @@ def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None,
     print(f"Registered {res.get('email', email)}" + (f" (GitHub: {res['github']})" if res.get("github") else "") +
           f". Token saved to {identity.identity_path()} (keep it private, never commit it).")
     return 0
+
+
+TOKEN_RX = re.compile(r"[A-Za-z0-9_\-]{8,128}")
+
+
+def cmd_login(args) -> int:
+    """Save the e-mail and token you were given (identity file in your home folder, never in the repo), then run `init` here."""
+    try:
+        cfg = config.load(_root(args))
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    t = cfg["telemetry"]
+    key = config.identity_key(t)
+    if not key:
+        print("error: no usage URL. Set [telemetry] endpoint (or register_url and usage_url) in cckit.toml.", file=sys.stderr)
+        return 2
+    domains = t["allowed_domains"]
+    interactive = sys.stdin.isatty()
+    try:
+        email = args.email
+        if not email:
+            found = identity.detect_email(str(_root(args)), domains)
+            if not interactive:
+                email = found[0] if found else ""
+            else:
+                for _ in range(3):
+                    ans = input(f"Your company e-mail ({' / '.join('@' + d for d in domains)})" + (f" [{found[0]}]" if found else "") + ": ").strip()
+                    email = ans or (found[0] if found else "")
+                    problem = identity.email_problem(email, domains)
+                    if not problem:
+                        break
+                    print(problem)
+        token = (args.token or os.environ.get("CCKIT_TOKEN") or "").strip()
+        if not token and interactive:
+            token = getpass.getpass("Token (typing is hidden): ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled.", file=sys.stderr)
+        return 130
+    problem = identity.email_problem(email or "", domains)
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+    if not TOKEN_RX.fullmatch(token):
+        print("error: no valid token. Paste the token you were given (letters, digits, - and _), or set CCKIT_TOKEN.", file=sys.stderr)
+        return 2
+    found_gh = identity.detect_github(str(_root(args)))
+    where = identity.save_identity(key, identity.normalise_email(email), found_gh[0] if found_gh else "", token)
+    print(f"Logged in as {identity.normalise_email(email)}. Saved to {where} (your home folder, owner-only: nothing is added to the repo).\n")
+    if args.no_init:
+        return 0
+    return cmd_init(argparse.Namespace(path=args.path, force=False, dry_run=False))
 
 
 def cmd_register(args) -> int:
@@ -313,6 +366,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--top", type=int, default=8)
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_report)
+
+    p = sub.add_parser("login", help="save the e-mail and token you were given, then run init in this repo")
+    common(p)
+    p.add_argument("--email", help="your company e-mail (default: from git config, else asked)")
+    p.add_argument("--token", help="your token (default: $CCKIT_TOKEN, else asked with hidden typing; a token on the command line stays in shell history)")
+    p.add_argument("--no-init", action="store_true", help="only save the login, do not run init")
+    p.set_defaults(fn=cmd_login)
 
     p = sub.add_parser("register", help="register this machine's GitHub user name for compaction reports")
     common(p)
