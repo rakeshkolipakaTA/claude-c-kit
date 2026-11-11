@@ -149,17 +149,30 @@ def post_json(url: str, payload: dict, timeout: float = 20) -> dict:
     try:
         d = json.loads(body)
     except json.JSONDecodeError as e:
-        raise RegisterError("the endpoint did not answer JSON. Is the URL the Usage API deployment's /exec URL, with access set to Anyone?") from e
+        raise RegisterError(SIGN_IN_HINT if looks_like_sign_in(body) else "the endpoint did not answer JSON. Is the URL a deployed /exec URL?") from e
     return d if isinstance(d, dict) else {}
+
+
+SIGN_IN_HINT = ("the deployment asks for a Google sign-in, so command-line tools cannot use it. In Apps Script: Deploy > Manage deployments > "
+                "edit the deployment > Who has access: Anyone (keep the Access Hub's own deployment restricted: use a second deployment for this).")
+
+
+def looks_like_sign_in(body: str, final_url: str = "") -> bool:
+    head = body.lstrip()[:200].lower()
+    return "accounts.google.com" in final_url or "/servicelogin" in final_url.lower() or head.startswith("<!doctype html") or head.startswith("<html")
 
 
 def ping(url: str, timeout: float = 15) -> dict:
     sep = "&" if "?" in url else "?"
     try:
         with urllib.request.urlopen(urllib.request.Request(url + sep + "api=ping", headers={"User-Agent": "cckit"}), timeout=timeout) as r:
-            d = json.loads(r.read().decode("utf-8", "replace"))
-    except (urllib.error.URLError, json.JSONDecodeError, ValueError) as e:
+            body, final = r.read().decode("utf-8", "replace"), r.geturl()
+    except urllib.error.URLError as e:
         raise RegisterError(f"ping failed: {getattr(e, 'reason', e)}") from e
+    try:
+        d = json.loads(body)
+    except ValueError as e:
+        raise RegisterError(SIGN_IN_HINT if looks_like_sign_in(body, final) else "ping failed: the endpoint did not answer JSON. Is the URL a deployed /exec URL?") from e
     return d if isinstance(d, dict) else {}
 
 

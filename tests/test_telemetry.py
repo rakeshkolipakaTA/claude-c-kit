@@ -654,3 +654,35 @@ def test_api_files_never_reference_conversation_content():
     src = "".join(read(p) for p in GS_DIR.glob("*.gs"))
     for word in ("compact_summary", "custom_instructions", "prompt"):
         assert word not in src.replace("prompts, code", "")
+
+
+# ------------------------------------------------------------------ a deployment that wants a Google sign-in is explained, not just "failed"
+@pytest.fixture
+def login_page_server():
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def _page(self):
+            body = b"<!DOCTYPE html><html><head><title>Sign in - Google Accounts</title></head></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+        do_GET = do_POST = lambda self: self._page()
+        log_message = lambda *a: None
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}/exec"
+    srv.shutdown()
+
+
+def test_ping_and_register_explain_a_sign_in_page(login_page_server, tmp_path, capsys):
+    with pytest.raises(identity.RegisterError, match="Google sign-in.*Who has access: Anyone"):
+        identity.ping(login_page_server)
+    write_cfg(tmp_path, endpoint=login_page_server)
+    assert cli.main(["whoami", str(tmp_path), "--check"]) == 1
+    assert "Google sign-in" in capsys.readouterr().out
+    assert cli.main(["register", str(tmp_path), "--email", ADA]) == 1
+    assert "Google sign-in" in capsys.readouterr().err
