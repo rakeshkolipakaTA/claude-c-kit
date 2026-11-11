@@ -21,6 +21,8 @@ import json
 import os
 import sys
 import platform
+import re
+import subprocess
 import time
 from collections import Counter
 from datetime import datetime
@@ -32,6 +34,7 @@ CSV_PATH = __CSV_PATH__
 WRITE_CSV = __WRITE_CSV__
 STOP_REPORT = __STOP_REPORT__
 ENDPOINT = __ENDPOINT__              # identifies the team's API in the identity file
+DOMAINS = __DOMAINS__                # company e-mail domains (to recognise the repo's git e-mail)
 USAGE_URL = __USAGE_URL__
 WINDOW = __WINDOW__
 SEND_PROJECT = __SEND_PROJECT__
@@ -215,9 +218,38 @@ def identity_path():
     return Path(base) / "cckit" / "identity.json"
 
 
-def load_identity():
-    rec = load_json(identity_path()).get(ENDPOINT)
-    return rec if isinstance(rec, dict) and rec.get("email") and rec.get("token") else None
+EMAIL_RX = re.compile(r"^[a-z0-9][a-z0-9._%+\-]{0,63}@([a-z0-9.\-]{3,60})$")
+
+
+def valid_record(rec):
+    return isinstance(rec, dict) and bool(rec.get("email")) and bool(rec.get("token"))
+
+
+def git_email(cwd):
+    """The company e-mail named by $CCKIT_EMAIL or `git config user.email` (an address outside DOMAINS is ignored), else None."""
+    cands = [os.environ.get("CCKIT_EMAIL", "")]
+    try:
+        cands.append(subprocess.run(["git", "config", "--get", "user.email"], capture_output=True, text=True, timeout=5, cwd=str(cwd)).stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for v in cands:
+        m = EMAIL_RX.match((v or "").strip().lower())
+        if m and m.group(1) in [d.lower() for d in DOMAINS]:
+            return v.strip().lower()
+    return None
+
+
+def load_identity(cwd="."):
+    """The record to report as: the one registered under the repo's git e-mail, else the default (registered last). With a single record git is not
+    asked, so the common case costs nothing."""
+    data = load_json(identity_path())
+    default = data.get(ENDPOINT) if valid_record(data.get(ENDPOINT)) else None
+    emails = {str(v["email"]).lower() for k, v in data.items() if (k == ENDPOINT or k.startswith(ENDPOINT + "|")) and valid_record(v)}
+    if len(emails) <= 1:
+        return default
+    email = git_email(cwd)
+    rec = data.get(ENDPOINT + "|" + email) if email else None
+    return rec if valid_record(rec) else default
 
 
 def env_int(name, lo, hi):
@@ -395,7 +427,7 @@ def main():
                 w.writerows(rows)
                 with open(csv_file, "a", encoding="utf-8", newline="") as f:
                     f.write(buf.getvalue())
-            ident = load_identity() if STOP_REPORT and USAGE_URL and os.environ.get("CCKIT_TELEMETRY", "").lower() not in ("off", "0", "false", "no") else None
+            ident = load_identity(root) if STOP_REPORT and USAGE_URL and os.environ.get("CCKIT_TELEMETRY", "").lower() not in ("off", "0", "false", "no") else None
             state["offsets"], state["recent"] = offsets, (recent + [r[2] for r in rows])[-RECENT:]
             if ident:                                       # nothing is collected for sending until this machine is registered
                 add_pending(state, rows)

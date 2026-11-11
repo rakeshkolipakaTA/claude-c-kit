@@ -34,8 +34,9 @@ def cmd_init(args) -> int:
             print("\nUsage reporting to the team app is off ([telemetry] enabled = false in .cckit/cckit.toml), so nobody is asked to register. Set it to true to turn it on.")
         elif not config.telemetry_active(cfg):
             print("\nUsage reporting is on but no URLs are set: give `endpoint`, or both `register_url` and `usage_url`, in [telemetry].")
-        elif not identity.get_identity(config.identity_key(t)):
-            print("\nUsage reporting is on for this repo, and this machine is not registered yet.")
+        elif not _registered_for_this_repo(cfg, _root(args)):
+            rec, git_email = identity.pick_identity(config.identity_key(t), str(_root(args)), t["allowed_domains"])
+            print("\nUsage reporting is on for this repo, and " + (f"this machine is registered as {rec['email']}, but this repo's git e-mail is {git_email}." if rec else "this machine is not registered yet."))
             have_key = bool(t["team_key"] or os.environ.get("CCKIT_TEAM_KEY"))
             if interactive or (have_key and identity.detect_email(str(_root(args)), t["allowed_domains"])):
                 try:
@@ -50,6 +51,13 @@ def cmd_init(args) -> int:
                 print("Run `cckit login` (company e-mail and the token you were given), or `cckit register` (e-mail and the team key), or set CCKIT_TEAM_KEY and start Claude Code here: "
                       "it registers you from the company e-mail in your git config.")
     return 0
+
+
+def _registered_for_this_repo(cfg: dict, root: Path) -> bool:
+    """True when this machine can report from this repo: a record exists for the repo's git e-mail, or git names no company e-mail and some record exists."""
+    t = cfg["telemetry"]
+    rec, git_email = identity.pick_identity(config.identity_key(t), str(root), t["allowed_domains"])
+    return bool(rec) and not (git_email and identity.normalise_email(rec["email"]) != git_email)
 
 
 def _offer_to_save_team_key(root: Path, key: str, force: bool) -> None:
@@ -220,8 +228,13 @@ def cmd_whoami(args) -> int:
     key = config.identity_key(t)
     show = lambda u: u or "(not set)"
     print(f"endpoint:   {show(t['endpoint'])}")
-    who = identity.get_identity(key) if key else None
+    who, git_email = identity.pick_identity(key, str(_root(args)), t["allowed_domains"]) if key else (None, None)
     print(f"registered: {(who['email'] + (' / GitHub ' + who['github'] if who.get('github') else '')) if who else 'no'}   (identity file: {identity.identity_path()})")
+    if who and git_email and identity.normalise_email(who["email"]) != git_email:
+        print(f"mismatch:   this repo's git e-mail is {git_email}; reports go out as {who['email']}. Run `cckit register` to register {git_email} too.")
+    others = [r["email"] for r in identity.all_identities(key)] if key else []
+    if len(others) > 1:
+        print(f"on this machine: {', '.join(others)}   (the one matching the repo's git e-mail is used)")
     print(f"register:   {show(config.api_url(t, 'register'))}")
     print(f"usage:      {show(config.api_url(t, 'usage'))}")
     print(f"ping:       {show(config.api_url(t, 'ping'))}")

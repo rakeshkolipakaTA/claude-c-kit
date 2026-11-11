@@ -154,6 +154,7 @@ def render_log_script(cfg: dict) -> str:
             .replace("__WRITE_CSV__", "True" if cfg["usage"]["log"] else "False")
             .replace("__STOP_REPORT__", "True" if config.stop_report_active(cfg) else "False")
             .replace("__ENDPOINT__", json.dumps(config.identity_key(t)))
+            .replace("__DOMAINS__", json.dumps(list(t["allowed_domains"])))
             .replace("__USAGE_URL__", json.dumps(config.api_url(t, "usage")))
             .replace("__FLUSH_EVERY__", str(int(t["stop_interval"])))
             .replace("__WINDOW__", str(cfg["context"]["auto_compact_window"]))

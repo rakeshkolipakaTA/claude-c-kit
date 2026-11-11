@@ -85,14 +85,36 @@ def write_private(p, data):
     os.replace(str(tmp), str(p))
 
 
-def load_identity():
-    rec = read_json(identity_path()).get(ENDPOINT)
-    return rec if isinstance(rec, dict) and rec.get("email") and rec.get("token") else None
+def valid_record(rec):
+    return isinstance(rec, dict) and bool(rec.get("email")) and bool(rec.get("token"))
+
+
+def pick_identity(cwd, always_git=False):
+    """(record to use here, the company e-mail git config names or None). One record per e-mail is kept; the one matching the repo's git e-mail is
+    used, else the default (registered last). With a single record git is not asked (fast path for hooks that run every turn) unless always_git."""
+    data = read_json(identity_path())
+    default = data.get(ENDPOINT) if valid_record(data.get(ENDPOINT)) else None
+    emails = {str(v["email"]).lower() for k, v in data.items() if (k == ENDPOINT or k.startswith(ENDPOINT + "|")) and valid_record(v)}
+    if len(emails) <= 1 and not always_git:
+        return default, None
+    found = detect_email(cwd)
+    git_email = found[0] if found else None
+    rec = data.get(ENDPOINT + "|" + git_email) if git_email else None
+    if not valid_record(rec) and default and git_email and str(default["email"]).lower() == git_email:
+        rec = default
+    return (rec if valid_record(rec) else default), git_email
+
+
+def load_identity(cwd=None):
+    return pick_identity(cwd or os.environ.get("CLAUDE_PROJECT_DIR") or "")[0]
 
 
 def save_identity(email, github, token):
+    """Keep this e-mail's record and make it the default."""
     data = read_json(identity_path())
-    data[ENDPOINT] = {"email": email, "github": github or "", "token": token}
+    rec = {"email": email, "github": github or "", "token": token}
+    data[ENDPOINT] = rec
+    data[ENDPOINT + "|" + email.lower()] = dict(rec)
     write_private(identity_path(), data)
 
 
@@ -118,7 +140,7 @@ def detect_email(cwd):
 
 
 def detect_github(cwd):
-    """(login, source) or None. Optional extra. Same rules as cckit.identity.detect_github (`git config user.name` is a display name: not used)."""
+    """(login, source) or None. Optional extra. Same rules as cckit.identity.detect_github (`git config user.name` is a display name: not used; the `gh` CLI is not asked: its account can be someone else's)."""
     v = os.environ.get("CCKIT_GITHUB", "")
     if GITHUB_RX.match(v):
         return v, "CCKIT_GITHUB"
@@ -128,9 +150,6 @@ def detect_github(cwd):
     m = NOREPLY_RX.match(run(["git", "config", "--get", "user.email"], cwd))
     if m and GITHUB_RX.match(m.group(1)):
         return m.group(1), "your git commit email (GitHub no-reply address)"
-    v = run(["gh", "api", "user", "--jq", ".login"], cwd)
-    if GITHUB_RX.match(v):
-        return v, "the GitHub CLI (gh)"
     for ln in run(["git", "config", "--get-regexp", r"^remote\..*\.url$"], cwd).splitlines():
         m = REMOTE_USER_RX.match(ln.split(None, 1)[-1])
         if m and m.group(1).lower() not in NOT_A_USER and GITHUB_RX.match(m.group(1)):
@@ -307,9 +326,12 @@ def auto_register(cwd):
 
 
 def session_start(data):
-    if load_identity() or not team_key():
-        return
     cwd = str(data.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or "")
+    rec, git_email = pick_identity(cwd, always_git=True)
+    if rec and not (git_email and str(rec["email"]).lower() != git_email):
+        return                                          # registered for this repo (or git names no company e-mail, and some record exists)
+    if not team_key():
+        return
     ok, note, ask = auto_register(cwd)
     if ok:
         print(json.dumps({"systemMessage": note}))
@@ -339,10 +361,11 @@ def main():
         if event == "SessionStart":
             session_start(data)
         elif event == "PreCompact":
-            ident = load_identity()
+            cwd = str(data.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or "")
+            ident = load_identity(cwd)
             if not ident and team_key():                  # the session started before registration was possible: try once more
-                if auto_register(str(data.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or ""))[0]:
-                    ident = load_identity()
+                if auto_register(cwd)[0]:
+                    ident = load_identity(cwd)
             if ident:
                 report(data, ident)
     except Exception:

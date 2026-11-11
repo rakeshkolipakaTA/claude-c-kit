@@ -16,7 +16,7 @@ sudo apt update && sudo apt install -y python3 python3-venv python3-pip git
 # create the environment and install cckit
 python3 -m venv ~/.cckit-venv
 ~/.cckit-venv/bin/python -m pip install --upgrade pip
-~/.cckit-venv/bin/python -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.3"
+~/.cckit-venv/bin/python -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.4"
 
 # make `cckit` available in every terminal (without activating the environment)
 mkdir -p ~/.local/bin && ln -sf ~/.cckit-venv/bin/cckit ~/.local/bin/cckit
@@ -39,7 +39,7 @@ winget install Git.Git
 # create the environment and install cckit
 py -3.12 -m venv $env:USERPROFILE\.cckit-venv
 & "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install --upgrade pip
-& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.3"
+& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.4"
 
 # use it without activating: put the environment's Scripts folder on your PATH (once, then open a new PowerShell)
 [Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:USERPROFILE\.cckit-venv\Scripts", "User")
@@ -66,7 +66,7 @@ git add CLAUDE.md .claude .cckit && git commit -m "Add cckit"
 - **`cckit` is "not found":** run it through Python instead, which is the same program: `~/.cckit-venv/bin/python -m cckit init` (Windows: `& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m cckit init`).
 - **`requires a different Python` (for example `3.9.x not in '>=3.10'`):** the environment was created with an old Python. Check with `python --version` (inside the environment) or `py -0p` (Windows), delete the environment folder, and create it again with a newer one: `py -3.12 -m venv ...` on Windows, `python3.12 -m venv ...` on Linux.
 - **`pip install` fails with a git error:** git is missing or not on the PATH (`git --version`), or there is no network access to github.com.
-- **Without a virtual environment** (not recommended): `python3 -m pip install --user "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.3"`; on recent Ubuntu this needs `--break-system-packages`, which is why the environment above is the better choice.
+- **Without a virtual environment** (not recommended): `python3 -m pip install --user "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.4"`; on recent Ubuntu this needs `--break-system-packages`, which is why the environment above is the better choice.
 - **From a clone of this repo** (for development): `python3 -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"` (Windows: `.venv\Scripts\Activate.ps1`).
 
 **Where things live (0.2.2+).** Everything cckit owns is under `.cckit/`: `cckit.toml` (settings), `key.json` (optional team key), `hooks/` and `scripts/` (the generated Python files), `token_usage.csv` (local log, git-ignored), `manifest.json`. Only what Claude Code itself requires stays in `.claude/` (`settings.json`, `agents/`, `rules/`, `commands/usage.md`) plus `CLAUDE.md`. Upgrading: `cckit init` moves an old `cckit.toml`, the hook scripts, the log and a `team_key` line into place by itself, and keeps what you edited.
@@ -156,8 +156,8 @@ to a small app you deploy yourself (it must be reachable without a login, becaus
   ping_url     = ""          # optional; default: .../api/ping next to register_url (used by `cckit whoami --check`)
   ```
   Changing the app or the domain means editing these lines, running `cckit init` (it rewrites the hook) and committing. Each machine's token is filed under the endpoint (or the usage URL), so a new address means a new registration, which the hook does by itself at the next session.
-- **Nothing to type for developers.** A `SessionStart` hook takes the company e-mail from `git config user.email` (a personal address is ignored and never sent) and, as optional extra, a GitHub login from git or `gh`; it shows one line saying what it used. With no company e-mail it asks Claude to ask the developer (at most every 3 days). Manual: `cckit register [--email E] [--github G]`, `cckit whoami --check`, `cckit doctor`.
-- The personal token (one per machine, up to 5 per developer) is saved in `~/.config/cckit/identity.json` (0600, never in the repo); the app keeps only its hash. `CCKIT_TELEMETRY=off` opts one machine out; `auto_register = false` turns the automatic step off for the repo.
+- **Nothing to type for developers.** A `SessionStart` hook takes the company e-mail from `git config user.email` (a personal address is ignored and never sent) and, as optional extra, a GitHub login from git (`github.user`, a no-reply address or a remote URL; the `gh` CLI is not used, because its account can be someone else's on a shared machine); it shows one line saying what it used. With no company e-mail it asks Claude to ask the developer (at most every 3 days). Manual: `cckit register [--email E] [--github G]`, `cckit whoami --check`, `cckit doctor`.
+- The personal token (one per machine, up to 5 per developer) is saved in `~/.config/cckit/identity.json` (0600, never in the repo); the app keeps only its hash. **One record is kept per e-mail**, and every hook reports as the record that matches the repo's `git config user.email` (else the one registered last), so a shared machine, or a changed git e-mail, works without editing any file: the start-up hook registers a new git e-mail by itself when the team key is available, and `cckit whoami` / `cckit doctor` show a mismatch. To pin one repo to one identity regardless of git, set `CCKIT_IDENTITY_FILE` in that repo's `.claude/settings.local.json` `env`. `CCKIT_TELEMETRY=off` opts one machine out; `auto_register = false` turns the automatic step off for the repo.
 - The PreCompact hook runs in the background, prints nothing, reads the transcript for numbers and tool **names** only (never prompts, code, paths, tool inputs/outputs or the summary), and does nothing when unregistered or offline.
 - The e-mail rule is checked in the package (before any network call) and again by the app. It checks the domain; it does not prove the person owns the mailbox.
 - Run and administer the app with `cckit server run | keys | users | deactivate | activate | reset EMAIL | dump`, or the same commands on `usage_api.py`. Tests run the real app over HTTP, as WSGI, and as the exported file in its own process.

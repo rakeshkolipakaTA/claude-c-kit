@@ -359,8 +359,8 @@ def test_github_detection_sources_and_order(tmp_path, monkeypatch):
     assert both_github(tmp_path, repo) == ("ada-dev", "a git remote URL")
     monkeypatch.setenv("GITHUB_USER", "codespace-user")
     assert both_github(tmp_path, repo)[0] == "ada-dev"
-    fake_gh(tmp_path, "gh-login")
-    assert both_github(tmp_path, repo) == ("gh-login", "the GitHub CLI (gh)")
+    fake_gh(tmp_path, "gh-login")                                           # a logged-in `gh` account is NOT used: on a shared machine it can be someone else
+    assert both_github(tmp_path, repo) == ("ada-dev", "a git remote URL")
     git(repo, "config", "user.email", "4242+noreply-login@users.noreply.github.com")
     assert both_github(tmp_path, repo)[0] == "noreply-login"
     git(repo, "config", "github.user", "explicit")
@@ -1682,3 +1682,88 @@ def test_the_old_default_log_location_moves_but_a_chosen_one_stays(tmp_path):
     (other / ".cckit/cckit.toml").write_text('[usage]\ncsv_path = "logs/tokens.csv"\n')
     apply.init(other)
     assert 'csv_path = "logs/tokens.csv"' in read(other / ".cckit/cckit.toml")
+
+
+# ------------------------------------------------------------------ several people / e-mails on one machine
+GRACE = "grace.hopper@tigeranalytics.com"
+
+
+def test_identities_are_kept_per_email_and_the_last_one_is_the_default():
+    ep = "https://e/api/usage"
+    identity.save_identity(ep, ADA, "", "tok-ada")
+    identity.save_identity(ep, GRACE, "", "tok-grace")
+    assert identity.get_identity(ep)["email"] == GRACE                              # the default: registered last
+    assert identity.get_identity(ep, ADA)["token"] == "tok-ada" and identity.get_identity(ep, GRACE.upper())["token"] == "tok-grace"
+    assert identity.get_identity(ep, "nobody@tigeranalytics.com") is None
+    assert sorted(r["email"] for r in identity.all_identities(ep)) == [ADA, GRACE]
+
+
+def test_a_file_from_before_0_2_4_still_works():
+    p = identity.identity_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"https://e/api/usage": {"email": ADA, "github": "", "token": "old"}}))
+    assert identity.get_identity("https://e/api/usage")["token"] == "old" and identity.get_identity("https://e/api/usage", ADA)["token"] == "old"
+    assert identity.get_identity("https://e/api/usage", GRACE) is None
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_the_record_matching_the_repos_git_email_is_used(server, tmp_path):
+    setup(server, tmp_path)
+    ep = server + "/exec"
+    identity.save_identity(ep, ADA, "", "tok-ada")
+    identity.save_identity(ep, GRACE, "", "tok-grace")                              # default is Grace
+    git_repo(tmp_path, email=ADA)
+    rec, git_email = identity.pick_identity(ep, str(tmp_path), [DOM])
+    assert (rec["token"], git_email) == ("tok-ada", ADA)                            # this repo is Ada's
+    git(tmp_path, "config", "user.email", "someone@gmail.com")                       # no company e-mail in git: the default
+    assert identity.pick_identity(ep, str(tmp_path), [DOM])[0]["token"] == "tok-grace"
+    assert load_script(tmp_path, ENDPOINT=ep).pick_identity(str(tmp_path), always_git=True)[0]["email"] == GRACE
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_hooks_report_as_the_person_in_the_repos_git_config(server, tmp_path):
+    setup(server, tmp_path)
+    git_repo(tmp_path, email=ADA)
+    for who in (ADA, GRACE):
+        assert cli.main(["register", str(tmp_path), "--email", who]) == 0           # two registrations on one machine
+    assert len(identity.all_identities(server + "/exec")) == 2
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(msg_line("m1") + "\n")
+    stop_hook(tmp_path, tr)                                                          # git says Ada, the default is Grace
+    assert {r["Email"] for r in stop_events(server)} == {ADA}
+    git(tmp_path, "config", "user.email", GRACE)
+    tr.write_text(tr.read_text() + msg_line("m2") + "\n")
+    stop_hook(tmp_path, tr)
+    assert sorted(r["Email"] for r in stop_events(server)) == [ADA, GRACE]
+    run_hook(tmp_path, rich_transcript(tmp_path / "c.jsonl"), cwd=tmp_path)           # PreCompact picks by git email too
+    assert rows(server, "Claude_Compactions")[-1]["Email"] == GRACE
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_session_start_registers_a_changed_git_email(server, tmp_path):
+    setup(server, tmp_path)
+    git_repo(tmp_path, email=ADA)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    git(tmp_path, "config", "user.email", GRACE)                                     # the person (or the git e-mail) changed
+    payload = {"hook_event_name": "SessionStart", "cwd": str(tmp_path), "source": "startup"}
+    p = subprocess.run([sys.executable, str(tmp_path / ".cckit/hooks/compact_report.py")], input=json.dumps(payload), capture_output=True, text=True,
+                       env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path)}, timeout=30)
+    assert p.returncode == 0 and GRACE in p.stdout                                   # it says whom it registered
+    assert identity.get_identity(server + "/exec", GRACE) and identity.get_identity(server + "/exec", ADA)
+    assert [r["Email"] for r in rows(server, "Claude_Users")] == [ADA, GRACE]
+    p2 = subprocess.run([sys.executable, str(tmp_path / ".cckit/hooks/compact_report.py")], input=json.dumps(payload), capture_output=True, text=True,
+                        env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path)}, timeout=30)
+    assert p2.stdout == "" and len(rows(server, "Claude_Users")) == 2                # already registered for this repo: nothing more
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_whoami_and_doctor_name_a_mismatch(server, tmp_path, capsys):
+    setup(server, tmp_path)
+    git_repo(tmp_path, email=ADA)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    git(tmp_path, "config", "user.email", GRACE)
+    capsys.readouterr()
+    cli.main(["whoami", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "mismatch" in out and GRACE in out and ADA in out
+    assert GRACE in doctor.run(tmp_path, check_claude=False).render() and "git e-mail" in doctor.run(tmp_path, check_claude=False).render()

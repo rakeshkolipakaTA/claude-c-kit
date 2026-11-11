@@ -39,15 +39,52 @@ def _load() -> dict:
         return {}
 
 
-def get_identity(endpoint: str) -> dict | None:
-    rec = _load().get(endpoint)
-    return rec if isinstance(rec, dict) and rec.get("email") and rec.get("token") else None
+def _valid(rec) -> bool:
+    return isinstance(rec, dict) and bool(rec.get("email")) and bool(rec.get("token"))
+
+
+def get_identity(endpoint: str, email: str | None = None) -> dict | None:
+    """The record for this usage app. With `email`: only the one registered under that address (None if there is none).
+    Without: the default, the one registered last."""
+    data = _load()
+    if email is None:
+        rec = data.get(endpoint)
+        return rec if _valid(rec) else None
+    e = normalise_email(email)
+    rec = data.get(f"{endpoint}|{e}")
+    if _valid(rec):
+        return rec
+    rec = data.get(endpoint)                                  # files written before 0.2.4 hold only the default record
+    return rec if _valid(rec) and normalise_email(rec.get("email", "")) == e else None
+
+
+def all_identities(endpoint: str) -> list[dict]:
+    """Every e-mail registered on this machine for this usage app (the default included once)."""
+    data = _load()
+    seen, out = set(), []
+    for k, rec in data.items():
+        if (k == endpoint or k.startswith(endpoint + "|")) and _valid(rec) and normalise_email(rec["email"]) not in seen:
+            seen.add(normalise_email(rec["email"]))
+            out.append(rec)
+    return out
+
+
+def pick_identity(endpoint: str, cwd: str | None, domains: list[str]) -> tuple[dict | None, str | None]:
+    """(record to use in this repo, the company e-mail the repo's git config names, or None).
+    The record registered under that e-mail when there is one, else the default. The caller compares the two e-mails to see a mismatch."""
+    found = detect_email(cwd, domains)
+    email = found[0] if found else None
+    rec = get_identity(endpoint, email) if email else None
+    return (rec or get_identity(endpoint)), email
 
 
 def save_identity(endpoint: str, email: str, github: str, token: str) -> Path:
+    """Keep this e-mail's record, and make it the default (the one used where git config names no company e-mail)."""
     p = identity_path()
     data = _load()
-    data[endpoint] = {"email": email, "github": github or "", "token": token}
+    rec = {"email": email, "github": github or "", "token": token}
+    data[endpoint] = rec
+    data[f"{endpoint}|{normalise_email(email)}"] = dict(rec)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(p.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)      # owner only: it holds a secret
@@ -109,9 +146,10 @@ def detect_github(cwd: str | None = None) -> tuple[str, str] | None:
       1. $CCKIT_GITHUB                      explicit override
       2. git config github.user             (.git/config of the repo, else ~/.gitconfig)
       3. git config user.email              when it is GitHub's no-reply address (ID+login@users.noreply.github.com)
-      4. `gh api user`                      the logged-in GitHub CLI account
-      5. a remote URL with a user in it     https://login@github.com/org/repo  (tokens in the URL are never read)
-      6. $GITHUB_USER / $GITHUB_ACTOR       Codespaces and CI
+      4. a remote URL with a user in it     https://login@github.com/org/repo  (tokens in the URL are never read)
+      5. $GITHUB_USER / $GITHUB_ACTOR       Codespaces and CI
+    The GitHub CLI (`gh`) is deliberately NOT asked: its logged-in account is often someone else's on a shared machine, and the e-mail it is
+    stored next to would then belong to a different person.
     `git config user.name` is NOT used: it is a display name ("Ada Lovelace"), not a login. The owner in a remote URL is the organisation.
     """
     env = os.environ
@@ -123,9 +161,6 @@ def detect_github(cwd: str | None = None) -> tuple[str, str] | None:
     m = NOREPLY_RX.match(_run(["git", "config", "--get", "user.email"], cwd))
     if m and valid_github(m.group(1)):
         return m.group(1), "your git commit email (GitHub no-reply address)"
-    v = _run(["gh", "api", "user", "--jq", ".login"], cwd)
-    if valid_github(v):
-        return v, "the GitHub CLI (gh)"
     for ln in _run(["git", "config", "--get-regexp", r"^remote\..*\.url$"], cwd).splitlines():
         m = REMOTE_USER_RX.match(ln.split(None, 1)[-1])
         if m and m.group(1).lower() not in NOT_A_USER and valid_github(m.group(1)):

@@ -220,8 +220,11 @@ def run(root: Path, check_claude: bool = True) -> Report:
             r.add("warn", f"auto_register needs the team key: put it in {config.KEY_NAME} as " + '{"key": "..."}' + " (or set CCKIT_TEAM_KEY); without it developers register with `cckit register`")
         elif tel["team_key"]:
             r.add("info", f"the team key is in {config.KEY_NAME}: commit that file only in a private repository (add it to .gitignore otherwise)")
-        who = identity.get_identity(config.identity_key(tel))
-        if who:
+        who, git_email = identity.pick_identity(config.identity_key(tel), str(root), tel["allowed_domains"])
+        if who and git_email and identity.normalise_email(who["email"]) != git_email:
+            r.add("warn", f"this machine is registered as {who['email']}, but this repo's git e-mail is {git_email}, so reports go out as {who['email']}. "
+                          f"Run `cckit register` to register {git_email} (or fix `git config user.email`).")
+        elif who:
             r.add("ok", f"compaction reports on; this machine is registered as {who['email']}")
         else:
             found = identity.detect_email(str(root), tel["allowed_domains"])
