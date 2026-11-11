@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import copy
 import re
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:               # Python 3.10: the same parser, as the `tomli` package
+    import tomli as tomllib
 from pathlib import Path
 from urllib.parse import urlparse
 

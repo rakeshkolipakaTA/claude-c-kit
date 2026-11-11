@@ -3,21 +3,71 @@
 A small Python package that writes **cost-saving Claude Code configuration into a repo**, so every developer who opens
 the repo gets the same cheap, safe defaults without setting anything up by hand.
 
-Install with plain `pip` (Python 3.11+, no dependencies, no pipx needed). Pin the tag so everyone gets the same version:
+## Install
+
+You need **Python 3.10 or newer** and **git** (pip fetches the package from GitHub). pip also installs the small `tomli` package on Python 3.10 (3.11+ has it built in); there are no other dependencies, and no pipx is needed. Install into a **virtual environment** (one per machine is enough): it works everywhere, and recent Ubuntu/Debian and macOS Python refuse a plain `pip install` with `externally-managed-environment`. Pin the tag so the whole team gets the same version.
+
+### Ubuntu / Debian / Linux / macOS
 
 ```bash
-python3 -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.2"
+# once: Python, venv and git (Ubuntu / Debian)
+sudo apt update && sudo apt install -y python3 python3-venv python3-pip git
+
+# create the environment and install cckit
+python3 -m venv ~/.cckit-venv
+~/.cckit-venv/bin/python -m pip install --upgrade pip
+~/.cckit-venv/bin/python -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.3"
+
+# make `cckit` available in every terminal (without activating the environment)
+mkdir -p ~/.local/bin && ln -sf ~/.cckit-venv/bin/cckit ~/.local/bin/cckit
+cckit --version                       # if "not found": open a new terminal, or add  export PATH="$HOME/.local/bin:$PATH"  to ~/.bashrc
+```
+
+Or activate the environment instead of the symlink: `source ~/.cckit-venv/bin/activate` (then `cckit ...`; `deactivate` leaves it).
+**Python version:** Ubuntu 22.04 (Python 3.10) and 24.04 (3.12) both work. Debian 11 and older ship Python 3.9 or older, which is too old: install a newer one first, for example
+`sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt update && sudo apt install -y python3.12 python3.12-venv` and then use `python3.12 -m venv ~/.cckit-venv` in place of `python3 -m venv ...`.
+On macOS, `python3` and `git` come with the Xcode command line tools or `brew install python git`.
+
+### Windows (PowerShell)
+
+```powershell
+# once: Python and git (skip what you already have)
+winget install Python.Python.3.12
+winget install Git.Git
+# close and reopen PowerShell so that `py` and `git` are found. `py -0p` lists the Pythons you have; if you already have 3.10 or newer you can skip the Python line and use `py -3.10` (or your version) below
+
+# create the environment and install cckit
+py -3.12 -m venv $env:USERPROFILE\.cckit-venv
+& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install --upgrade pip
+& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.3"
+
+# use it without activating: put the environment's Scripts folder on your PATH (once, then open a new PowerShell)
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:USERPROFILE\.cckit-venv\Scripts", "User")
+cckit --version
+```
+
+Or activate it for the current window: `& "$env:USERPROFILE\.cckit-venv\Scripts\Activate.ps1"`. If PowerShell says scripts are disabled, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned` first (it only affects that window), or use **Command Prompt** instead: `%USERPROFILE%\.cckit-venv\Scripts\activate.bat`.
+On Windows the hooks must call `python`, not `python3`: after `cckit init`, set `python = "python"` under `[hooks]` in `.cckit/cckit.toml` and run `cckit init` again.
+
+### Use it in a repo (any system)
+
+```bash
 cd your-repo
 cckit login                 # company e-mail + the token you were given (or `cckit init`, which asks for the e-mail and team key)
 cckit doctor                # checks the repo against .cckit/cckit.toml
-git add .cckit/cckit.toml CLAUDE.md .claude .cckit && git commit
+git add CLAUDE.md .claude .cckit && git commit -m "Add cckit"
 ```
 
-- If pip says `externally-managed-environment` (recent Debian/Ubuntu/macOS Homebrew Python), use a virtual environment:
-  `python3 -m venv ~/.cckit-venv && ~/.cckit-venv/bin/python -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.2"`,
-  or add `--user`. On Windows use `py -m pip ...`.
-- If `cckit` is "not found" after installing (pip's script folder is not on PATH), run it as `python3 -m cckit init` instead; it is the same program.
-- From a clone of this repo: `pip install -e .`.
+### Upgrade, remove, and troubleshooting
+
+- **Upgrade** (use the new tag; then run `cckit init` once in each repo and commit the result):
+  `~/.cckit-venv/bin/python -m pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@vX.Y.Z"` (Windows: `& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install --upgrade "git+...@vX.Y.Z"`). Replace `vX.Y.Z` with the tag you are moving to.
+- **Remove cckit itself:** delete the environment folder (`rm -rf ~/.cckit-venv`, or `Remove-Item -Recurse $env:USERPROFILE\.cckit-venv`). Repos keep working: the files cckit generated are plain files and do not need cckit.
+- **`cckit` is "not found":** run it through Python instead, which is the same program: `~/.cckit-venv/bin/python -m cckit init` (Windows: `& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m cckit init`).
+- **`requires a different Python` (for example `3.9.x not in '>=3.10'`):** the environment was created with an old Python. Check with `python --version` (inside the environment) or `py -0p` (Windows), delete the environment folder, and create it again with a newer one: `py -3.12 -m venv ...` on Windows, `python3.12 -m venv ...` on Linux.
+- **`pip install` fails with a git error:** git is missing or not on the PATH (`git --version`), or there is no network access to github.com.
+- **Without a virtual environment** (not recommended): `python3 -m pip install --user "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.3"`; on recent Ubuntu this needs `--break-system-packages`, which is why the environment above is the better choice.
+- **From a clone of this repo** (for development): `python3 -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"` (Windows: `.venv\Scripts\Activate.ps1`).
 
 **Where things live (0.2.2+).** Everything cckit owns is under `.cckit/`: `cckit.toml` (settings), `key.json` (optional team key), `hooks/` and `scripts/` (the generated Python files), `token_usage.csv` (local log, git-ignored), `manifest.json`. Only what Claude Code itself requires stays in `.claude/` (`settings.json`, `agents/`, `rules/`, `commands/usage.md`) plus `CLAUDE.md`. Upgrading: `cckit init` moves an old `cckit.toml`, the hook scripts, the log and a `team_key` line into place by itself, and keeps what you edited.
 

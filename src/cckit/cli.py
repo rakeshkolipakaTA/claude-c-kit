@@ -25,7 +25,7 @@ def cmd_init(args) -> int:
         return 2
     print("\n".join(res.lines))
     print(("\nDry run: nothing was written." if args.dry_run else f"\n{res.changed} file(s) written.") +
-          "\nNext: run `cckit doctor`, review the diff, and commit .cckit/cckit.toml, CLAUDE.md, .claude/ and .cckit/.")
+          "\nNext: run `cckit doctor`, review the diff, and commit CLAUDE.md, .claude/ and .cckit/.")
     if not args.dry_run:
         cfg = config.load(_root(args))
         t = cfg["telemetry"]
