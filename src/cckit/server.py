@@ -1,32 +1,37 @@
-"""The register and usage APIs as a small standalone HTTP service (standard library only, data in SQLite).
+"""cckit usage API: the register and usage endpoints as one standalone app (standard library only, data in SQLite).
 
-Why this exists: a Google Apps Script web app can only be called without a Google sign-in when it is deployed with access "Anyone",
-and many organisations forbid that. This server offers the SAME two APIs from any host you control (a VM, a container, a PaaS), and
-the Google Sheet stays the reporting view: an Apps Script time trigger (Pull.gs) pulls new rows from `?api=export`, which only needs
-outbound access.
+Run it:                python usage_api.py run --host 0.0.0.0 --port 8080
+Behind gunicorn:       gunicorn -w 1 --threads 8 usage_api:application      (one worker: SQLite and the lock live in one process)
+Admin tools:           python usage_api.py keys | users | deactivate EMAIL | activate EMAIL | reset EMAIL | dump --table events --out events.csv
 
-  POST ?api=register   {"email", "github"?, "team_key"}                       -> {"ok", "email", "github", "token", "devices", "verified"}
-  POST ?api=usage      {"email", "token", "event_id", "trigger", "model", ...} -> {"ok"}
-  GET  ?api=ping                                                              -> {"ok", "service", "ready"}
-  GET  ?api=export&table=events|users&after=ID&limit=N   (Authorization: Bearer <admin token>)   -> rows for the sheet
+  POST /?api=register   {"email", "github"?, "team_key"}                       -> {"ok", "email", "github", "token", "devices", "verified"}
+  POST /?api=usage      {"email", "token", "event_id", "trigger", "model", ...} -> {"ok"}
+  GET  /?api=ping                                                              -> {"ok", "service", "ready"}
+  GET  /healthz                                                                -> {"ok": true}
+  GET  /?api=export&table=events|users&after=ID&limit=N[&format=csv]           -> rows (header: Authorization: Bearer <admin token>)
 
-Same rules as the Apps Script version: a company e-mail on an allowed domain, the team key to register, a per-machine token to report
-(only SHA-256 hashes are stored, up to 5 machines per developer), length-limited values with spreadsheet formulas neutralised,
-hourly limits, repeated events dropped. Nothing from the conversation is ever stored.
+Rules: a company e-mail on an allowed domain, the team key to register, a per-machine token to report (only SHA-256 hashes are stored, up to
+5 machines per developer), length-limited values with spreadsheet formulas neutralised, hourly limits, repeated events dropped. Nothing from
+the conversation is ever stored, and request bodies and query strings are never logged.
 
-Run behind HTTPS (a reverse proxy or the platform's load balancer): the client refuses plain http except for localhost.
-Configuration is by environment variable so that secrets stay out of the process list:
+Serve it over HTTPS (a reverse proxy or the platform's load balancer): the cckit client refuses plain http except for localhost.
+Configuration is by environment variable, so that secrets stay out of the process list:
   CCKIT_TEAM_KEY (required)   CCKIT_ADMIN_TOKEN (needed for ?api=export)   CCKIT_ALLOWED_DOMAINS (default tigeranalytics.com, comma separated)
   CCKIT_DB (default usage.db)   PORT / --port   CCKIT_HOST / --host
 """
 from __future__ import annotations
 
+import argparse
+import csv
 import hashlib
 import hmac
+import io
 import json
+import os
 import re
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -213,15 +218,18 @@ class UsageApi:
             ctx, win = n("context_tokens", 5e6), n("window", 5e6)
             inp, out, cr, cw = n("input_tokens"), n("output_tokens"), n("cache_read"), n("cache_write")
             s = lambda k, lim: clean_str(b.get(k), lim)
-            c.execute(
-                "INSERT INTO events(received_at, event_id, email, github, trig, model, effort, claude_version, entrypoint, context_tokens, win, context_pct,"
-                " input_tokens, output_tokens, cache_read, cache_write, cache_hit_pct, requests, sub_requests, sub_output, tool_calls, models, tools,"
-                " session_minutes, compactions_before, project, branch, session, os, partial, client) VALUES(" + ",".join("?" * 31) + ")",
-                (now_iso(), eid, email, row["github"], "manual" if b.get("trigger") == "manual" else "auto", s("model", 60), s("effort", 20),
-                 s("claude_version", 20), s("entrypoint", 30), ctx, win, pct(ctx, win), inp, out, cr, cw, pct(cr, inp + cr + cw),
-                 n("requests"), n("sub_requests"), n("sub_output"), n("tool_calls"), s("models", 300), s("tools", 300),
-                 n("session_minutes", 1e6), n("compactions_before", 1e5), s("project", 80), s("branch", 80), s("session", 64), s("os", 20),
-                 "Yes" if b.get("partial") else "", s("client", 40)))
+            try:
+                c.execute(
+                    "INSERT INTO events(received_at, event_id, email, github, trig, model, effort, claude_version, entrypoint, context_tokens, win, context_pct,"
+                    " input_tokens, output_tokens, cache_read, cache_write, cache_hit_pct, requests, sub_requests, sub_output, tool_calls, models, tools,"
+                    " session_minutes, compactions_before, project, branch, session, os, partial, client) VALUES(" + ",".join("?" * 31) + ")",
+                    (now_iso(), eid, email, row["github"], "manual" if b.get("trigger") == "manual" else "auto", s("model", 60), s("effort", 20),
+                     s("claude_version", 20), s("entrypoint", 30), ctx, win, pct(ctx, win), inp, out, cr, cw, pct(cr, inp + cr + cw),
+                     n("requests"), n("sub_requests"), n("sub_output"), n("tool_calls"), s("models", 300), s("tools", 300),
+                     n("session_minutes", 1e6), n("compactions_before", 1e5), s("project", 80), s("branch", 80), s("session", 64), s("os", 20),
+                     "Yes" if b.get("partial") else "", s("client", 40)))
+            except sqlite3.IntegrityError:                          # the same event_id from another process, a moment ago
+                return {"ok": True, "duplicate": True}
             c.execute("UPDATE users SET last_seen = ?, compactions = compactions + 1 WHERE email = ?", (now_iso(), email))
             return {"ok": True}
 
@@ -252,7 +260,7 @@ class UsageApi:
 
     # ---------------------------------------------------------------- HTTP-shaped entry point
     def handle(self, method: str, query: dict, body: bytes, auth: str = "") -> tuple[int, dict]:
-        """Returns (http status, JSON object). Application errors are 200 with ok:false, like the Apps Script version."""
+        """Returns (http status, JSON object). Application errors are 200 with ok:false, so that clients read one shape."""
         api = (query.get("api") or [""])[0]
         try:
             if method == "GET":
@@ -289,15 +297,34 @@ class UsageApi:
             return 500, {"ok": False, "error": "server error"}
 
 
+# ============================================================ HTTP: one response function shared by the built-in server and WSGI
+def to_csv(columns: list, rows: list) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(columns)
+    w.writerows(rows)
+    return buf.getvalue()
+
+
+def respond(api: UsageApi, method: str, query: dict, body: bytes, auth: str) -> tuple[int, str, bytes]:
+    """(status, content type, body). Export answers CSV when ?format=csv, everything else is JSON."""
+    status, obj = api.handle(method, query, body, auth)
+    if status == 200 and (query.get("format") or [""])[0] == "csv" and "columns" in obj:
+        return 200, "text/csv; charset=utf-8", to_csv(obj["columns"], obj["rows"]).encode("utf-8")
+    return status, "application/json", json.dumps(obj).encode("utf-8")
+
+
+TOO_LARGE = (200, "application/json", json.dumps({"ok": False, "error": "payload too large"}).encode("utf-8"))
+
+
 def make_server(host: str, port: int, api: UsageApi) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         server_version = "cckit-usage"
         sys_version = ""
 
-        def _send(self, status: int, obj: dict) -> None:
-            data = json.dumps(obj).encode("utf-8")
+        def _send(self, status: int, ctype: str, data: bytes) -> None:
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -306,7 +333,7 @@ def make_server(host: str, port: int, api: UsageApi) -> ThreadingHTTPServer:
         def _go(self, method: str) -> None:
             u = urlparse(self.path)
             if u.path == "/healthz":
-                return self._send(200, {"ok": True})
+                return self._send(200, "application/json", b'{"ok": true}')
             body = b""
             if method == "POST":
                 try:
@@ -315,9 +342,9 @@ def make_server(host: str, port: int, api: UsageApi) -> ThreadingHTTPServer:
                     n = -1
                 if n < 0 or n > HARD_BODY_LIMIT:                  # refuse without reading: do not let a stranger make us buffer megabytes
                     self.close_connection = True
-                    return self._send(200, {"ok": False, "error": "payload too large"})
+                    return self._send(*TOO_LARGE)
                 body = self.rfile.read(n)                           # up to 64 KB, so the client always gets its answer
-            self._send(*api.handle(method, parse_qs(u.query), body, self.headers.get("Authorization", "")))
+            self._send(*respond(api, method, parse_qs(u.query), body, self.headers.get("Authorization", "")))
 
         def do_GET(self):
             self._go("GET")
@@ -328,6 +355,132 @@ def make_server(host: str, port: int, api: UsageApi) -> ThreadingHTTPServer:
         def log_message(self, fmt, *args):                    # no request bodies, no query strings (tokens never reach a log)
             pass
 
-    srv = ThreadingHTTPServer((host, port), Handler)
-    srv.daemon_threads = True
-    return srv
+    class Server(ThreadingHTTPServer):
+        request_queue_size = 128          # the default (5) resets connections when a team's machines report at the same moment
+        daemon_threads = True
+
+    return Server((host, port), Handler)
+
+
+# ---- WSGI (gunicorn usage_api:application): the app is built from the environment on the first request
+_APP: UsageApi | None = None
+_APP_LOCK = threading.Lock()
+
+
+def application(environ, start_response):
+    global _APP
+    try:
+        with _APP_LOCK:
+            if _APP is None:
+                _APP = from_env()
+        query = parse_qs(environ.get("QUERY_STRING", ""))
+        method = environ.get("REQUEST_METHOD", "GET")
+        if environ.get("PATH_INFO") == "/healthz":
+            status, ctype, data = 200, "application/json", b'{"ok": true}'
+        else:
+            body = b""
+            if method == "POST":
+                try:
+                    n = int(environ.get("CONTENT_LENGTH") or 0)
+                except ValueError:
+                    n = -1
+                body = b"" if n < 0 or n > HARD_BODY_LIMIT else environ["wsgi.input"].read(n)
+                if n < 0 or n > HARD_BODY_LIMIT:
+                    status, ctype, data = TOO_LARGE
+                    start_response("200 OK", [("Content-Type", ctype), ("Content-Length", str(len(data)))])
+                    return [data]
+            status, ctype, data = respond(_APP, method, query, body, environ.get("HTTP_AUTHORIZATION", ""))
+    except ValueError as e:                                   # not configured: say so in the log, not to the caller
+        print(f"cckit usage API is not configured: {e}", file=sys.stderr)
+        status, ctype, data = 500, "application/json", b'{"ok": false, "error": "server error"}'
+    start_response(f"{status} {'OK' if status == 200 else 'ERROR'}", [("Content-Type", ctype), ("Content-Length", str(len(data))), ("Cache-Control", "no-store")])
+    return [data]
+
+
+# ============================================================ command line (python usage_api.py ...  or  cckit server ...)
+def from_env(db: str | None = None, domains: str | None = None) -> UsageApi:
+    env = os.environ
+    key = env.get("CCKIT_TEAM_KEY", "")
+    if not key:
+        raise ValueError("set CCKIT_TEAM_KEY (the join code developers use; `keys` makes one)")
+    return UsageApi(db or env.get("CCKIT_DB") or "usage.db", key, (domains or env.get("CCKIT_ALLOWED_DOMAINS") or "tigeranalytics.com").split(","),
+                    env.get("CCKIT_ADMIN_TOKEN", ""))
+
+
+def serve(api: UsageApi, host: str, port: int) -> int:
+    srv = make_server(host, port, api)
+    print(f"cckit usage API listening on http://{host}:{port}  (db: {api.db_path}; domains: {', '.join(api.domains)})")
+    print("export: " + ("enabled" if api.admin_token else "DISABLED (set CCKIT_ADMIN_TOKEN)") + ". Put HTTPS in front of this port: clients refuse plain http.", flush=True)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="usage_api.py", description="cckit usage API (register + usage endpoints)")
+    sub = ap.add_subparsers(dest="cmd")
+    pr = sub.add_parser("run", help="start the server (the default)")
+    pr.add_argument("--host", help="default $CCKIT_HOST or 127.0.0.1 (use 0.0.0.0 in a container)")
+    pr.add_argument("--port", type=int, help="default $PORT or 8080")
+    sub.add_parser("keys", help="print a fresh team key and admin token")
+    sub.add_parser("users", help="list registered developers")
+    for name, h in (("deactivate", "switch a developer off"), ("activate", "switch a developer on"),
+                    ("reset", "forget a developer's machine tokens (they register again at the next session)")):
+        sub.add_parser(name, help=h).add_argument("email")
+    pd = sub.add_parser("dump", help="write a table as CSV")
+    pd.add_argument("--table", choices=["events", "users"], default="events")
+    pd.add_argument("--out", help="file (default: standard output)")
+    for name, sp in sub.choices.items():
+        if name != "keys":
+            sp.add_argument("--db", help="SQLite file (default $CCKIT_DB or usage.db)")
+            sp.add_argument("--domains", help="allowed e-mail domains, comma separated (default $CCKIT_ALLOWED_DOMAINS or tigeranalytics.com)")
+    args = ap.parse_args(argv)
+    cmd = args.cmd or "run"
+    if cmd == "keys":
+        print(f"CCKIT_TEAM_KEY={secrets.token_hex(8)}\nCCKIT_ADMIN_TOKEN={secrets.token_hex(24)}")
+        print("\nSet both as environment variables on the host (never in a file in a repository). Developers get the team key; the admin token is for exports only.", file=sys.stderr)
+        return 0
+    try:
+        api = from_env(getattr(args, "db", None), getattr(args, "domains", None))
+    except ValueError as e:
+        if cmd in ("users", "deactivate", "activate", "reset", "dump") and not os.environ.get("CCKIT_TEAM_KEY"):
+            os.environ["CCKIT_TEAM_KEY"] = "-"                  # admin commands read the database only: no key needed
+            api = from_env(getattr(args, "db", None), getattr(args, "domains", None))
+        else:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+    if cmd == "run":
+        return serve(api, getattr(args, "host", None) or os.environ.get("CCKIT_HOST") or "127.0.0.1", getattr(args, "port", None) or int(os.environ.get("PORT") or 8080))
+    if cmd == "users":
+        rows = api.export("users")["rows"]
+        print(f"{'email':<42} {'github':<20} {'devices':>7} {'active':<6} {'compactions':>11}  last seen")
+        for r in rows:
+            print(f"{r[0]:<42} {r[1]:<20} {r[4]:>7} {r[5]:<6} {r[7]:>11}  {r[6]}")
+        print(f"\n{len(rows)} user(s)")
+        return 0
+    if cmd == "dump":
+        cols, out, after = None, [], 0
+        while True:
+            d = api.export(args.table, after, 2000)
+            cols = d["columns"]
+            out += d["rows"]
+            after = d.get("last_id", 0)
+            if not d.get("more"):
+                break
+        text = to_csv(cols, out)
+        if args.out:
+            with open(args.out, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+            print(f"wrote {len(out)} row(s) to {args.out}")
+        else:
+            sys.stdout.write(text)
+        return 0
+    done = {"deactivate": lambda: api.set_active(args.email, False), "activate": lambda: api.set_active(args.email, True), "reset": lambda: api.reset(args.email)}[cmd]()
+    print(f"{cmd}: {args.email}" if done else f"no such user: {args.email}")
+    return 0 if done else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

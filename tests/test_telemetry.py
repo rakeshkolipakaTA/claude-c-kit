@@ -1,7 +1,6 @@
-"""Usage reporting: config, generated hook, the two APIs (register, usage), Tiger e-mail checks, and end-to-end runs.
+"""Usage reporting: config, generated hook, the two APIs (register, usage), Tiger e-mail checks, the standalone app, and end-to-end runs.
 
-The end-to-end tests run the REAL Apps Script files that ship in the package (src/cckit/assets/apps_script) in Node behind a small HTTP
-server that behaves like a deployed web app (see tests/sim). They are skipped when `node` is not installed.
+The end-to-end tests run the real usage app (cckit.server) over HTTP on a local port.
 """
 import importlib.util
 import json
@@ -17,15 +16,11 @@ import pytest
 
 from cckit import apply, cli, config, doctor, identity, render, server as usage_server
 
-SIM = Path(__file__).parent / "sim" / "usage_server_sim.js"
-GS_DIR = Path(render.__file__).parent / "assets" / "apps_script"
 KEY = "teamkey123"
 ADMIN = "admintoken456"
 DOM = "tigeranalytics.com"
 ADA = "ada.lovelace@tigeranalytics.com"
 GIT = shutil.which("git")
-NODE = shutil.which("node")     # resolved now: the fixture below narrows PATH
-REAL_PATH = os.environ.get("PATH", "")
 
 
 def read(p):
@@ -376,43 +371,31 @@ def test_metrics_of_a_missing_or_empty_transcript_are_zero(tmp_path):
     assert mod.session_metrics(str(tmp_path / "e.jsonl"))["model"] == ""
 
 
-# ------------------------------------------------------------------ the two APIs, end to end against the real Apps Script files
-BACKENDS = {}      # base URL -> (kind, UsageApi or None): lets the helpers below read either backend the same way
-
-
+# ------------------------------------------------------------------ the two APIs, end to end against the real app
 def fake_github(login):
     return {"nosuchuser": "No", "ratelimited": "Unchecked"}.get(login, "Yes")
 
 
-@pytest.fixture(params=["appscript", "python"])
-def server(request, tmp_path_factory):
-    """The same API twice: the Google Apps Script files (run in Node) and `cckit server` (Python). Every test using this fixture must pass on both."""
-    if request.param == "appscript":
-        if not NODE:
-            pytest.skip("needs node")
-        proc = subprocess.Popen([NODE, str(SIM), str(GS_DIR), KEY], stdout=subprocess.PIPE, text=True)
-        base = f"http://127.0.0.1:{int(proc.stdout.readline().split()[1])}"
-        BACKENDS[base] = ("appscript", None)
-        yield base
-        proc.terminate()
-        return
+APIS = {}      # base URL -> UsageApi, so the helpers below can read what the server stored
+
+
+@pytest.fixture
+def server(tmp_path_factory):
+    """The usage app, listening on a free local port. Yields its base URL."""
     import threading
     api = usage_server.UsageApi(str(tmp_path_factory.mktemp("db") / "usage.db"), KEY, [DOM], admin_token=ADMIN, github_check=fake_github)
     srv = usage_server.make_server("127.0.0.1", 0, api)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
-    BACKENDS[base] = ("python", api)
+    APIS[base] = api
     yield base
     srv.shutdown()
     srv.server_close()
 
 
 def dump(base):
-    kind, api = BACKENDS[base]
-    if kind == "appscript":
-        return json.loads(urllib.request.urlopen(base + "/_dump").read())
     out = {}
-    u, e = api.export("users"), api.export("events", 0, 2000)
+    u, e = APIS[base].export("users"), APIS[base].export("events", 0, 2000)
     if u["rows"]:
         out["Claude_Users"] = [u["columns"]] + u["rows"]
     if e["rows"]:
@@ -426,17 +409,11 @@ def rows(base, tab):
 
 
 def clear_tokens(base, email):
-    """What an admin does: Apps Script = clear the 'Token Hashes' cell in the sheet; server = `cckit server reset`."""
-    kind, api = BACKENDS[base]
-    if kind == "appscript":
-        urllib.request.urlopen(base + f"/_clearhash?u={email}").read()
-    else:
-        assert api.reset(email)
+    assert APIS[base].reset(email)                  # what `usage_api.py reset EMAIL` does
 
 
 def devices(base, email):
-    u = [r for r in rows(base, "Claude_Users") if r["Email"] == email][0]
-    return int(u["Devices"]) if "Devices" in u else len([h for h in u["Token Hashes"].split(",") if h])
+    return int([r for r in rows(base, "Claude_Users") if r["Email"] == email][0]["Devices"])
 
 
 def run_hook(repo, tr, trigger="auto", extra_env=None, cwd=None):
@@ -673,34 +650,6 @@ def test_cckit_init_registers_from_git_without_a_terminal(server, tmp_path, caps
 
 
 # ------------------------------------------------------------------ the server files ship in the package
-def test_api_export_writes_the_three_files_and_check_notices_drift(tmp_path, capsys):
-    out = tmp_path / "gs"
-    assert cli.main(["api", "export", "--out", str(out)]) == 0
-    assert sorted(p.name for p in out.iterdir()) == ["Api.gs", "Register.gs", "Usage.gs"]
-    assert cli.main(["api", "export", "--check", "--out", str(out)]) == 0
-    (out / "Usage.gs").write_text("// edited by hand\n")
-    assert cli.main(["api", "export", "--check", "--out", str(out)]) == 1
-    assert "Usage.gs" in capsys.readouterr().out
-    assert cli.main(["api", "export", "--standalone", "--out", str(out)]) == 0
-    assert (out / "Standalone.gs").exists() and "edited by hand" not in read(out / "Usage.gs")
-
-
-@pytest.mark.skipif(not NODE, reason="needs node")
-def test_exported_apps_script_files_parse(tmp_path):
-    out = tmp_path / "gs"
-    cli.main(["api", "export", "--standalone", "--out", str(out)])
-    for f in out.glob("*.gs"):
-        js = tmp_path / (f.stem + ".js")
-        js.write_text(read(f))
-        assert subprocess.run([NODE, "--check", str(js)], capture_output=True, text=True).returncode == 0, f.name
-
-
-def test_api_files_never_reference_conversation_content():
-    src = "".join(read(p) for p in GS_DIR.glob("*.gs"))
-    for word in ("compact_summary", "custom_instructions", "prompt"):
-        assert word not in src.replace("prompts, code", "").replace("ui.prompt", "")
-
-
 # ------------------------------------------------------------------ a deployment that wants a Google sign-in is explained, not just "failed"
 @pytest.fixture
 def login_page_server():
@@ -724,13 +673,13 @@ def login_page_server():
 
 
 def test_ping_and_register_explain_a_sign_in_page(login_page_server, tmp_path, capsys):
-    with pytest.raises(identity.RegisterError, match="Google sign-in.*Who has access: Anyone"):
+    with pytest.raises(identity.RegisterError, match="web page.*usage app"):
         identity.ping(login_page_server)
     write_cfg(tmp_path, endpoint=login_page_server)
     assert cli.main(["whoami", str(tmp_path), "--check"]) == 1
-    assert "Google sign-in" in capsys.readouterr().out
+    assert "web page" in capsys.readouterr().out
     assert cli.main(["register", str(tmp_path), "--email", ADA]) == 1
-    assert "Google sign-in" in capsys.readouterr().err
+    assert "web page" in capsys.readouterr().err
 
 
 # ------------------------------------------------------------------ `cckit server`: things only the standalone server has
@@ -749,14 +698,8 @@ def http_get(url, token=None):
 
 
 @pytest.fixture
-def pyserver(tmp_path):
-    import threading
-    api = new_api(tmp_path)
-    srv = usage_server.make_server("127.0.0.1", 0, api)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}", api
-    srv.shutdown()
-    srv.server_close()
+def pyserver(server):
+    return server, APIS[server]
 
 
 def seed(base, n_events, email=ADA):
@@ -906,93 +849,145 @@ def test_client_registers_against_the_standalone_server_with_the_default_urls(py
     assert cli.main(["whoami", str(tmp_path), "--check"]) == 0
 
 
-# ------------------------------------------------------------------ Pull.gs: the sheet copies rows from the server (Node + a real server)
-PULL_SIM = Path(__file__).parent / "sim" / "puller_sim.js"
+# ------------------------------------------------------------------ CSV export, WSGI, dump, and the deployable app folder
+def http_text(url, token=None):
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token} if token else {})
+    with urllib.request.urlopen(req) as r:
+        return r.status, r.headers.get("Content-Type"), r.read().decode("utf-8")
 
 
-def pull(tmp_path, base, action="pull", token=ADMIN, answers=None, state="sheet", rewrite=None):
-    args = [NODE, str(PULL_SIM), str(GS_DIR), str(tmp_path / f"{state}_state.json"), base, token, action] + ([json.dumps(answers)] if answers is not None else [])
-    env = {**os.environ, "PATH": REAL_PATH, **({"PULL_SIM_REWRITE": rewrite} if rewrite else {})}      # the sim shells out to curl
-    p = subprocess.run(args, capture_output=True, text=True, timeout=120, env=env)
-    assert p.returncode == 0, p.stderr
-    return json.loads(p.stdout.strip().splitlines()[-1])
-
-
-@pytest.mark.skipif(not NODE, reason="needs node")
-def test_pull_copies_new_rows_once_and_only_new_rows(pyserver, tmp_path):
-    base, api = pyserver
-    tok = seed(base, 3)
-    identity.post_json(base + "/?api=usage", {"email": ADA, "token": tok, "event_id": "fx", "model": "=SUM(A1)", "project": "+cmd"})
-    r = pull(tmp_path, base)
-    assert r.get("error") is None and r["result"] == {"events": 4, "users": 1}
-    ev = r["sheets"]["Claude_Compactions"]
-    assert ev[0][:3] == ["Received At", "Event ID", "Email"] and [row[1] for row in ev[1:]] == ["ev0", "ev1", "ev2", "fx"]
-    assert ev[4][5] == "'=SUM(A1)" and ev[4][25] == "'+cmd"                                # formulas neutralised
-    assert r["sheets"]["Claude_Users"][1][0] == ADA and r["props"]["USAGE_PULL_AFTER"] == "4"
-    assert pull(tmp_path, base)["result"] == {"events": 0, "users": 1}                   # nothing new: nothing copied twice
-    identity.post_json(base + "/?api=usage", {"email": ADA, "token": tok, "event_id": "ev9"})
-    r = pull(tmp_path, base)
-    assert r["result"]["events"] == 1 and [row[1] for row in r["sheets"]["Claude_Compactions"][1:]] == ["ev0", "ev1", "ev2", "fx", "ev9"]
-    assert len(r["sheets"]["Claude_Users"]) == 2                                          # header + one developer: replaced, not appended
-    assert tok not in json.dumps(r["sheets"]) and sha_of(tok) not in json.dumps(r["sheets"])
-
-
-@pytest.mark.skipif(not NODE, reason="needs node")
-def test_pull_can_start_over_without_duplicating(pyserver, tmp_path):
+def test_csv_export_has_the_same_columns_and_needs_the_admin_token(pyserver):
+    import csv as csvmod
+    import io
     base, _ = pyserver
     seed(base, 2)
-    assert pull(tmp_path, base)["result"]["events"] == 2
-    again = pull(tmp_path, base, "scratch")
-    assert again["result"]["events"] == 2 and [row[1] for row in again["sheets"]["Claude_Compactions"][1:]] == ["ev0", "ev1"]
+    status, ctype, body = http_text(base + "/?api=export&table=events&format=csv", ADMIN)
+    assert status == 200 and ctype.startswith("text/csv")
+    rows_ = list(csvmod.reader(io.StringIO(body)))
+    assert rows_[0][:3] == ["Received At", "Event ID", "Email"] and [r[1] for r in rows_[1:]] == ["ev0", "ev1"]
+    assert http_get(base + "/?api=export&table=events&format=csv")[0] == 401                  # no token, no data, whatever the format
+    assert "ev0" not in json.dumps(http_get(base + "/?api=export&table=events&format=csv", "wrong")[1])
 
 
-@pytest.mark.skipif(not NODE, reason="needs node")
-def test_pull_says_what_is_wrong_when_the_token_is_wrong_or_export_is_off(pyserver, tmp_path):
+def test_csv_cells_that_look_like_formulas_stay_neutralised(pyserver):
     base, _ = pyserver
-    assert "rejected the admin token" in pull(tmp_path, base, token="wrong")["error"]
+    tok = seed(base, 0)
+    identity.post_json(base + "/?api=usage", {"email": ADA, "token": tok, "event_id": "f", "model": "=cmd|' /C calc'!A0", "project": "@SUM(1)", "branch": "-2+3"})
+    body = http_text(base + "/?api=export&table=events&format=csv", ADMIN)[2]
+    assert ",'=cmd" in body and ",'@SUM" in body and ",'-2+3" in body
+
+
+def wsgi_call(app, method="GET", query="", body=b"", auth="", path="/"):
+    import io
+    out = {}
+    environ = {"REQUEST_METHOD": method, "QUERY_STRING": query, "PATH_INFO": path, "CONTENT_LENGTH": str(len(body)),
+               "wsgi.input": io.BytesIO(body), "HTTP_AUTHORIZATION": auth}
+    chunks = app(environ, lambda status, headers: out.update(status=status, headers=dict(headers)))
+    return out["status"], out["headers"], b"".join(chunks)
+
+
+def test_wsgi_entry_point_serves_the_same_api(tmp_path, monkeypatch):
+    monkeypatch.setenv("CCKIT_TEAM_KEY", KEY)
+    monkeypatch.setenv("CCKIT_ADMIN_TOKEN", ADMIN)
+    monkeypatch.setenv("CCKIT_DB", str(tmp_path / "w.db"))
+    monkeypatch.setattr(usage_server, "_APP", None)
+    s, h, b = wsgi_call(usage_server.application, query="api=ping")
+    assert s.startswith("200") and json.loads(b)["ready"] is True
+    assert json.loads(wsgi_call(usage_server.application, path="/healthz")[2]) == {"ok": True}
+    s, h, b = wsgi_call(usage_server.application, "POST", "api=register", json.dumps({"email": ADA, "team_key": KEY}).encode())
+    tok = json.loads(b)["token"]
+    assert json.loads(wsgi_call(usage_server.application, "POST", "api=usage", json.dumps({"email": ADA, "token": tok, "event_id": "w1"}).encode())[2]) == {"ok": True}
+    assert wsgi_call(usage_server.application, query="api=export&table=events", auth="Bearer nope")[0].startswith("401")
+    s, h, b = wsgi_call(usage_server.application, query="api=export&table=events&format=csv", auth="Bearer " + ADMIN)
+    assert h["Content-Type"].startswith("text/csv") and b"w1" in b
+    big = wsgi_call(usage_server.application, "POST", "api=usage", b"x" * 70000)
+    assert json.loads(big[2])["error"] == "payload too large"
+
+
+def test_wsgi_without_configuration_fails_safely(monkeypatch, capsys):
+    monkeypatch.delenv("CCKIT_TEAM_KEY", raising=False)
+    monkeypatch.setattr(usage_server, "_APP", None)
+    s, h, b = wsgi_call(usage_server.application, query="api=ping")
+    assert s.startswith("500") and json.loads(b) == {"ok": False, "error": "server error"}
+    assert "CCKIT_TEAM_KEY" in capsys.readouterr().err                       # the log says why; the caller does not learn it
+
+
+def test_the_same_event_arriving_at_two_processes_is_stored_once(tmp_path):
     import threading
-    srv = usage_server.make_server("127.0.0.1", 0, usage_server.UsageApi(str(tmp_path / "n.db"), KEY, [DOM], admin_token=""))
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    a, b = new_api(tmp_path), new_api(tmp_path)                               # two instances = two processes: separate locks, one database
+    tok = a.register({"email": ADA, "team_key": KEY})["token"]
+    results = []
+
+    def go(api, i):
+        results.append(api.usage({"email": ADA, "token": tok, "event_id": f"dup{i % 5}"}))
+
+    ts = [threading.Thread(target=go, args=(a if i % 2 else b, i)) for i in range(20)]
+    [x.start() for x in ts]
+    [x.join() for x in ts]
+    assert all(r["ok"] for r in results) and len(a.export("events", 0, 100)["rows"]) == 5
+
+
+def test_dump_command_writes_csv(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "d.db")
+    monkeypatch.setenv("CCKIT_DB", db)
+    monkeypatch.delenv("CCKIT_TEAM_KEY", raising=False)                       # admin commands need no key
+    api = usage_server.UsageApi(db, KEY, [DOM], github_check=fake_github)
+    tok = api.register({"email": ADA, "team_key": KEY})["token"]
+    for i in range(3):
+        api.usage({"email": ADA, "token": tok, "event_id": f"d{i}", "model": "m"})
+    out = tmp_path / "events.csv"
+    assert cli.main(["server", "dump", "--table", "events", "--out", str(out)]) == 0
+    assert read(out).count("\n") == 4 and "d2" in read(out)
+    capsys.readouterr()
+    assert cli.main(["server", "dump", "--table", "users"]) == 0
+    assert ADA in capsys.readouterr().out
+    assert cli.main(["server", "users"]) == 0
+
+
+def test_export_app_writes_a_deployable_folder_and_check_notices_drift(tmp_path, capsys):
+    out = tmp_path / "usage-api"
+    assert cli.main(["server", "export-app", "--out", str(out)]) == 0
+    assert sorted(p.name for p in out.iterdir()) == [".dockerignore", ".env.example", ".gitignore", "Dockerfile", "README.md", "usage_api.py"]
+    assert cli.main(["server", "export-app", "--check", "--out", str(out)]) == 0
+    (out / "usage_api.py").write_text("# edited\n")
+    assert cli.main(["server", "export-app", "--check", "--out", str(out)]) == 1
+    assert "usage_api.py" in capsys.readouterr().out
+
+
+def test_the_app_file_needs_nothing_from_cckit(tmp_path):
+    out = tmp_path / "app"
+    cli.main(["server", "export-app", "--out", str(out)])
+    src = read(out / "usage_api.py")
+    assert "import cckit" not in src and "from cckit" not in src and "from . import" not in src
+    assert read(out / "usage_api.py") == read(Path(usage_server.__file__))    # exactly the module the tests exercise
+    assert "CCKIT_TEAM_KEY=\n" in read(out / ".env.example") and "gunicorn" in read(out / "README.md")
+
+
+def test_the_exported_app_runs_on_its_own_and_serves_the_client(tmp_path):
+    """Run usage_api.py as a separate process, outside the cckit package, and register + report through the real client."""
+    import socket
+    out = tmp_path / "app"
+    cli.main(["server", "export-app", "--out", str(out)])
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    env = {"PATH": os.environ["PATH"], "CCKIT_TEAM_KEY": KEY, "CCKIT_ADMIN_TOKEN": ADMIN, "CCKIT_DB": str(tmp_path / "own.db")}
+    proc = subprocess.Popen([sys.executable, "-I", str(out / "usage_api.py"), "run", "--port", str(port)], env=env, cwd=str(tmp_path),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
-        assert "not enabled" in pull(tmp_path, f"http://127.0.0.1:{srv.server_address[1]}", token="x", state="noexport")["error"]
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(50):
+            try:
+                if http_get(base + "/?api=ping")[1]["ready"]:
+                    break
+            except OSError:
+                time.sleep(0.1)
+        write_cfg(tmp_path, endpoint=base + "/")
+        assert cli.main(["whoami", str(tmp_path), "--check"]) == 0
+        assert cli.main(["register", str(tmp_path), "--email", ADA]) == 0
+        tok = identity.get_identity(base + "/")["token"]
+        assert identity.post_json(base + "/?api=usage", {"email": ADA, "token": tok, "event_id": "own1", "model": "m"}) == {"ok": True}
+        assert "own1" in http_text(base + "/?api=export&table=events&format=csv", ADMIN)[2]
     finally:
-        srv.shutdown()
-    assert "not set up" in pull(tmp_path, "", token="", state="unset")["error"]
-
-
-@pytest.mark.skipif(not NODE, reason="needs node")
-def test_setup_refuses_http_can_be_cancelled_and_installs_exactly_one_trigger(pyserver, tmp_path):
-    base, _ = pyserver
-    seed(base, 2)
-    rw = f"https://usage.test|{base}"
-    clean = lambda state: {"state": state, "rewrite": rw}
-    # the setup flow must not rely on pre-set properties: run it from an empty state
-    bad = pull(tmp_path, "", token="", action="setup", answers=["http://insecure.example.com", ADMIN], **clean("a"))
-    assert any("must start with https://" in m for m in bad["alerts"]) and bad["triggers"] == [] and "USAGE_ADMIN_TOKEN" not in bad["props"]
-    cancel = pull(tmp_path, "", token="", action="setup", answers=[None], **clean("b"))
-    assert cancel["triggers"] == [] and cancel["props"] == {}
-    ok = pull(tmp_path, "", token="", action="setup", answers=["https://usage.test/?x=1#y", ADMIN], **clean("c"))
-    assert ok.get("error") is None and ok["props"]["USAGE_SERVER_URL"] == "https://usage.test" and ok["props"]["USAGE_ADMIN_TOKEN"] == ADMIN
-    assert ok["triggers"] == [{"fn": "pullClaudeUsage", "every": 15}] and "2 compactions, 1 developers" in ok["alerts"][-1]
-    twice = pull(tmp_path, "", token="", action="setup", answers=["https://usage.test", ADMIN], **clean("c"))
-    assert twice["triggers"] == [{"fn": "pullClaudeUsage", "every": 15}]                   # replaced, not duplicated
-    assert len(twice["sheets"]["Claude_Compactions"]) == 3 and twice["props"]["USAGE_PULL_AFTER"] == "2"   # same server: cursor kept, header + 2 rows, no repeats
-    assert "1 compactions" not in twice["alerts"][-1] and "0 compactions" in twice["alerts"][-1]
-
-
-# ------------------------------------------------------------------ api export modes
-def test_api_export_puller_mode_writes_only_pull_gs(tmp_path):
-    out = tmp_path / "gs"
-    assert cli.main(["api", "export", "--mode", "puller", "--out", str(out)]) == 0
-    assert [p.name for p in out.iterdir()] == ["Pull.gs"]
-    assert cli.main(["api", "export", "--mode", "puller", "--check", "--out", str(out)]) == 0
-    (out / "Pull.gs").write_text("//x")
-    assert cli.main(["api", "export", "--mode", "puller", "--check", "--out", str(out)]) == 1
-
-
-@pytest.mark.skipif(not NODE, reason="needs node")
-def test_pull_gs_parses_and_has_no_web_entry_point(tmp_path):
-    js = tmp_path / "p.js"
-    js.write_text(read(GS_DIR / "Pull.gs"))
-    assert subprocess.run([NODE, "--check", str(js)], capture_output=True).returncode == 0
-    assert "doPost" not in read(GS_DIR / "Pull.gs") and "doGet" not in read(GS_DIR / "Pull.gs")      # nothing public is exposed
+        proc.terminate()
+        proc.wait(timeout=10)

@@ -71,10 +71,10 @@ warn_context_pct = 60         # the status line turns into a "/compact or /clear
 otel_endpoint = ""            # set to your collector (for example http://collector.example.com:4317) to get OpenTelemetry
                               # settings in .cckit/managed-settings.example.json (they are IGNORED in a repo settings file)
 
-[telemetry]                   # report every context compaction to a team Google Apps Script endpoint (see `cckit register`)
+[telemetry]                   # report every context compaction to the team usage app (`cckit server export-app` writes it; see `cckit register`)
 enabled = false
 endpoint = ""                 # the "Usage API" /exec URL (https://script.google.com/macros/s/.../exec). Two APIs live behind it:
-                              # ?api=register (sign up) and ?api=usage (post a compaction). Export the server with `cckit api export`.
+                              # ?api=register (sign up) and ?api=usage (post a compaction).
 register_url = ""             # optional: full URL of the register API, if you deploy it separately (default: endpoint + ?api=register)
 usage_url = ""                # optional: full URL of the usage API (default: endpoint + ?api=usage)
 allowed_domains = ["tigeranalytics.com"]   # registration needs an e-mail on one of these domains (checked here and again on the server)

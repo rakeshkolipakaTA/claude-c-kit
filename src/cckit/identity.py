@@ -138,7 +138,7 @@ def detect_github(cwd: str | None = None) -> tuple[str, str] | None:
 
 # ----------------------------------------------------------------------------- talking to the APIs
 def post_json(url: str, payload: dict, timeout: float = 20) -> dict:
-    """POST JSON as text/plain (Apps Script reads the raw body). Apps Script answers with a redirect that urllib follows."""
+    """POST JSON as text/plain. Redirects are followed by urllib (some hosts answer a POST with one)."""
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST",
                                  headers={"Content-Type": "text/plain;charset=utf-8", "User-Agent": "cckit"})
     try:
@@ -153,8 +153,8 @@ def post_json(url: str, payload: dict, timeout: float = 20) -> dict:
     return d if isinstance(d, dict) else {}
 
 
-SIGN_IN_HINT = ("the deployment asks for a Google sign-in, so command-line tools cannot use it. In Apps Script: Deploy > Manage deployments > "
-                "edit the deployment > Who has access: Anyone (keep the Access Hub's own deployment restricted: use a second deployment for this).")
+SIGN_IN_HINT = ("the URL answered with a web page (a sign-in or error page) instead of the usage API. Check that it is the address of the usage app, "
+                "and that it is not behind a login or a proxy that needs one.")
 
 
 def looks_like_sign_in(body: str, final_url: str = "") -> bool:

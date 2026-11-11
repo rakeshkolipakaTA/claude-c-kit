@@ -257,17 +257,15 @@ def build_mcp_profiles(cfg: dict) -> dict[str, str]:
     return out
 
 
-# ----------------------------------------------------------------------------- the server side (Google Apps Script)
-APPS_SCRIPT_FILES = ("Api.gs", "Register.gs", "Usage.gs")
+# ----------------------------------------------------------------------------- the server side: a standalone app
+USAGE_APP_FILES = {"README.md": "README.md", "Dockerfile": "Dockerfile", ".env.example": "env.example", ".gitignore": "gitignore", ".dockerignore": "dockerignore"}
 
 
-def build_apps_script(standalone: bool = False, mode: str = "direct") -> dict[str, str]:
-    """Apps Script files. direct: the two APIs (register, usage) hosted by Apps Script. puller: Pull.gs, which copies rows from a `cckit server`."""
-    if mode == "puller":
-        names: tuple = ("Pull.gs",)
-    else:
-        names = APPS_SCRIPT_FILES + (("Standalone.gs",) if standalone else ())
-    return {n: resources.files("cckit").joinpath("assets", "apps_script", n).read_text(encoding="utf-8") for n in names}
+def build_usage_app() -> dict[str, str]:
+    """The deployable usage API: usage_api.py (a copy of cckit.server, one file, no dependencies), Dockerfile, README with the endpoint reference, env example."""
+    files = {name: resources.files("cckit").joinpath("assets", "usage_app", src).read_text(encoding="utf-8") for name, src in USAGE_APP_FILES.items()}
+    files["usage_api.py"] = resources.files("cckit").joinpath("server.py").read_text(encoding="utf-8")
+    return dict(sorted(files.items()))
 
 
 # ----------------------------------------------------------------------------- admin-only example

@@ -52,23 +52,23 @@ Also set: `BASH_MAX_OUTPUT_LENGTH`, `MAX_MCP_OUTPUT_TOKENS`, and `Read(...)` den
 * **Local, no server**: `cckit report --days 7` reads the token counts in `~/.claude/projects/**/*.jsonl` (numbers only, never message text): tokens per day and model, cache hit rate, the heaviest sessions, and a flag on sessions whose context got very long. Add `[prices.sonnet]` to `cckit.toml` to get an *estimated* cost; the real bill is in your admin console.
 * **Team-wide**: put `.cckit/managed-settings.example.json` through managed settings (OpenTelemetry metrics `claude_code.token.usage` and `claude_code.cost.usage`). `OTEL_*` variables are ignored in a repo's settings file, which is why this is a separate file.
 
-## Reporting usage to a team sheet (optional)
-`[telemetry]` in `cckit.toml` adds hooks and **two APIs** (Google Apps Script, shipped in this package):
+## Reporting usage to a team (optional)
+`[telemetry]` in `cckit.toml` adds hooks that register each developer with a **company e-mail** (`allowed_domains`, default `tigeranalytics.com`) and report one row per context compaction
+to a small app you deploy yourself (it must be reachable without a login, because a hook has none). The app is one dependency-free Python file:
+`cckit server export-app --out usage-api` writes it with a Dockerfile and a README that documents every endpoint.
 
-| API | URL | What it does |
-|---|---|---|
-| register | `POST <endpoint>?api=register` | registers a **company e-mail** (`allowed_domains`, default `tigeranalytics.com`) and optionally a GitHub login; returns a personal token for this machine |
-| usage | `POST <endpoint>?api=usage` | one row per context compaction: model used, effort, Claude Code version, entrypoint, context and window tokens, session input/output/cache tokens, cache hit %, requests (main and subagents), models and tool names with counts, session minutes, compactions before, repo folder and branch, OS |
+| Endpoint | What it does |
+|---|---|
+| `POST /?api=register` | registers an e-mail (+ optional GitHub login); returns a personal token for this machine |
+| `POST /?api=usage` | one row per compaction: model used, effort, Claude Code version, entrypoint, context and window tokens, session input/output/cache tokens, cache hit %, requests (main and subagents), models and tool names with counts, session minutes, compactions before, repo folder and branch, OS |
+| `GET /?api=ping`, `GET /healthz` | health |
+| `GET /?api=export&table=events\|users[&format=csv]` | read the data (admin token) |
 
-- **Two ways to host the APIs** (same protocol, so developers' machines do not care which you pick):
-  1. **`cckit server` (use this when your organisation forbids public Apps Script deployments).** A small standard-library Python service with SQLite: `cckit server keys`, then `cckit server run` (or the `deploy/Dockerfile`; see `deploy/README.md` for Docker, a VM with HTTPS, and what to back up). Your Google Sheet then **pulls** from it: `cckit api export --mode puller` writes `Pull.gs`; run `setupUsagePull` once and a 15-minute trigger copies new rows into the tabs `Claude_Compactions` and `Claude_Users`. Apps Script only makes outbound calls, so no "Anyone" deployment is needed. Manage people with `cckit server users | deactivate | activate | reset EMAIL`.
-  2. **Apps Script as the server (only if "Anyone" deployments are allowed).** `cckit api export --out apps-script` writes `Api.gs`, `Register.gs`, `Usage.gs` (add `--standalone` for a project that is not the Access Hub). Paste them in, run `setupUsageApi`, deploy as a web app (Execute as Me, access Anyone) and use the `/exec` URL. A deployment that asks for a Google sign-in cannot be used: `cckit whoami --check` says so.
-  `cckit api export --check` tells you when an exported copy is out of date. To host register and usage separately set `register_url` and `usage_url`.
-- **The e-mail rule:** only addresses on an allowed domain register. It is checked in the package (before any network call, with a helpful message) and again on the server. The check is on the domain; it does not prove the person owns the mailbox.
-- **Nothing to type for developers.** A `SessionStart` hook takes the company e-mail from `git config user.email` (a personal address is ignored and never sent) and, as optional extra, a GitHub login from `git config github.user`, the GitHub no-reply commit email, `gh`, or a user name in a remote URL (`user.name` is a display name and a remote's owner is the organisation, so neither is used). It shows one line saying what it used. With no company e-mail it asks Claude to ask the developer (at most every 3 days); Claude runs `python3 .claude/hooks/compact_report.py --register EMAIL`, which needs no `cckit` install. Manual: `cckit register [--email E] [--github G]`, `cckit whoami --check`, `cckit doctor`.
-- The personal token (one per machine, up to 5 per developer) is saved in `~/.config/cckit/identity.json` (0600, never in the repo); the sheet keeps only its hash. `CCKIT_TELEMETRY=off` opts one machine out; `auto_register = false` turns the automatic step off for the repo. The team key is embedded in the generated hook script (it is a join code, also in `cckit.toml`).
+- **Nothing to type for developers.** A `SessionStart` hook takes the company e-mail from `git config user.email` (a personal address is ignored and never sent) and, as optional extra, a GitHub login from git or `gh`; it shows one line saying what it used. With no company e-mail it asks Claude to ask the developer (at most every 3 days). Manual: `cckit register [--email E] [--github G]`, `cckit whoami --check`, `cckit doctor`.
+- The personal token (one per machine, up to 5 per developer) is saved in `~/.config/cckit/identity.json` (0600, never in the repo); the app keeps only its hash. `CCKIT_TELEMETRY=off` opts one machine out; `auto_register = false` turns the automatic step off for the repo.
 - The PreCompact hook runs in the background, prints nothing, reads the transcript for numbers and tool **names** only (never prompts, code, paths, tool inputs/outputs or the summary), and does nothing when unregistered or offline.
-- End-to-end tests run every API test twice, against the real Apps Script files (in Node, behind a small HTTP server that behaves like a deployed web app) and against `cckit server`; `Pull.gs` is tested in Node against a real server (`tests/sim`).
+- The e-mail rule is checked in the package (before any network call) and again by the app. It checks the domain; it does not prove the person owns the mailbox.
+- Run and administer the app with `cckit server run | keys | users | deactivate | activate | reset EMAIL | dump`, or the same commands on `usage_api.py`. Tests run the real app over HTTP, as WSGI, and as the exported file in its own process.
 
 ## What a repo file cannot do
 
@@ -83,8 +83,8 @@ cckit init [path] [--dry-run] [--force]    create/update files; --force replaces
 cckit doctor [path]                        verify the repo; exit code 1 on failures
 cckit print-settings [path]                show the settings.json content cckit manages
 cckit register [--email E] [--github G]    register this machine for usage reports (see [telemetry])
-cckit api export [--mode direct|puller] [--out DIR] [--standalone|--check]   write the Apps Script files
-cckit server run | keys | users | deactivate|activate|reset EMAIL   the standalone public usage service
+cckit server export-app [--out DIR]        write the deployable usage app
+cckit server run | keys | users | deactivate|activate|reset EMAIL | dump   run and administer the usage app
 cckit whoami [--check]                     show the telemetry setting and registered user; --check pings the endpoint
 cckit report [--days N] [--project TEXT] [--json]
 cckit run [--profile NAME] [--effort E] [--model M] [-- claude args]
