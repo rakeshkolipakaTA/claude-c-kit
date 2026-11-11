@@ -59,7 +59,7 @@ def desired_files(cfg: dict) -> dict[str, str]:
         files[render.STATUS_SCRIPT] = render.render_statusline_script(cfg)
     if config.telemetry_active(cfg):
         files[render.COMPACT_SCRIPT] = render.render_compact_script(cfg)
-    if cfg["usage"]["log"]:
+    if render.stop_hook_on(cfg):
         files[render.LOG_SCRIPT] = render.render_log_script(cfg)
     if cfg["usage"]["scripts"]:
         files[render.REPORT_SCRIPT] = render.render_report_script(cfg)

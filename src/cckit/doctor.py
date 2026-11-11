@@ -180,7 +180,7 @@ def run(root: Path, check_claude: bool = True) -> Report:
         scripts.append(render.STATUS_SCRIPT)
     if config.telemetry_active(cfg):
         scripts.append(render.COMPACT_SCRIPT)
-    if cfg["usage"]["log"]:
+    if render.stop_hook_on(cfg):
         scripts.append(render.LOG_SCRIPT)
     if cfg["usage"]["scripts"]:
         scripts += [render.REPORT_SCRIPT, render.USAGE_COMMAND]

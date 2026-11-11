@@ -1374,3 +1374,136 @@ def test_login_prompts_with_hidden_token(tmp_path, monkeypatch, capsys):
     assert cli.main(["login", str(tmp_path), "--no-init"]) == 0
     assert asked and not (tmp_path / "cckit.toml").exists()                                       # --no-init: login only
     assert identity.get_identity(config.identity_key(config.load(tmp_path)["telemetry"]))["token"] == "tok_ABCDEF123456"
+
+
+# ------------------------------------------------------------------ the Stop hook reports usage (trigger "stop")
+def msg_line(mid, model="claude-sonnet-5-5", inp=10, out=50, cr=100, cw=20, side=False, sid="sess-1"):
+    return json.dumps({"type": "assistant", "uuid": "u" + mid, "isSidechain": side, "timestamp": "2026-07-01T10:00:00Z", "sessionId": sid,
+                       "message": {"id": mid, "model": model, "usage": {"input_tokens": inp, "output_tokens": out, "cache_read_input_tokens": cr,
+                                                                         "cache_creation_input_tokens": cw},
+                                   "content": [{"type": "text", "text": "SECRET ANSWER"}]}})
+
+
+def stop_hook(repo, tr, extra_env=None):
+    payload = {"session_id": "sess-1", "hook_event_name": "Stop", "cwd": str(repo), "transcript_path": str(tr)}
+    p = subprocess.run([sys.executable, str(repo / ".claude/hooks/log_token_usage.py")], input=json.dumps(payload), capture_output=True, text=True,
+                       env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo), **(extra_env or {})}, timeout=60)
+    assert p.returncode == 0 and p.stdout == "" and p.stderr == ""
+    return p
+
+
+def stop_state(repo):
+    return json.loads((repo / ".claude/token_usage.csv.state.json").read_text())
+
+
+def age_state(repo, **kv):
+    p = repo / ".claude/token_usage.csv.state.json"
+    d = json.loads(p.read_text())
+    d.update(kv)
+    p.write_text(json.dumps(d))
+
+
+def stop_events(server):
+    return [r for r in rows(server, "Claude_Compactions") if r["Trigger"] == "stop"]
+
+
+def test_stop_hook_posts_per_model_totals_once(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    tr = tmp_path / "t.jsonl"
+    tr.write_text("\n".join([msg_line("m1", inp=10, out=50, cr=100, cw=20), msg_line("m1", inp=10, out=60, cr=100, cw=20),   # a message is written once per content block
+                             msg_line("m2", inp=5, out=40, cr=300, cw=0), msg_line("h1", model="claude-haiku-5-5", inp=1, out=7, cr=0, cw=0, side=True)]) + "\n")
+    stop_hook(tmp_path, tr)
+    ev = {r["Model"]: r for r in stop_events(server)}
+    assert set(ev) == {"claude-sonnet-5-5", "claude-haiku-5-5"}                       # one event per model, so each is priced with its own rates
+    s = ev["claude-sonnet-5-5"]
+    assert (s["Input Tokens"], s["Output Tokens"], s["Cache Read"], s["Cache Write"], s["Requests"]) == (15, 100, 400, 20, 2)   # the final count of m1 (60), not both lines
+    assert (s["Context Tokens"], s["Session"], s["Project"], s["Client"], s["Email"]) == (305, "sess-1", tmp_path.name, "cckit-stop/1", ADA)
+    h = ev["claude-haiku-5-5"]
+    assert (h["Input Tokens"], h["Output Tokens"], h["Requests"], h["Subagent Requests"], h["Subagent Output"]) == (1, 7, 0, 1, 7)
+    assert rows(server, "Claude_Users")[0]["Compactions"] == 0                         # Stop events are not compactions
+    stop_hook(tmp_path, tr)                                                           # nothing new: nothing sent
+    assert len(stop_events(server)) == 2
+    whole = json.dumps(dump(server)) + (tmp_path / ".claude/token_usage.csv.state.json").read_text()
+    tok = identity.get_identity(server + "/exec")["token"]
+    assert "SECRET" not in whole and tok not in whole                                 # no text from the conversation, and the token is not kept in the state file
+
+
+def test_stop_reports_wait_a_minute_and_are_not_lost(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(msg_line("m1") + "\n")
+    stop_hook(tmp_path, tr)
+    assert len(stop_events(server)) == 1
+    tr.write_text(tr.read_text() + msg_line("m2", out=70) + "\n")
+    stop_hook(tmp_path, tr)                                                           # less than a minute later: kept, not sent
+    assert len(stop_events(server)) == 1 and stop_state(tmp_path)["pending"]["claude-sonnet-5-5"]["o"] == 70
+    age_state(tmp_path, last_flush=time.time() - 120)
+    stop_hook(tmp_path, tr)
+    ev = stop_events(server)
+    assert len(ev) == 2 and sorted(r["Output Tokens"] for r in ev) == [50, 70]         # the waiting numbers went out with the next event
+    assert stop_state(tmp_path)["pending"] == {} and stop_state(tmp_path)["outbox"] == []
+
+
+def test_undelivered_events_are_retried_with_the_same_id(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    good = identity.get_identity(server + "/exec")
+    identity.save_identity(server + "/exec", ADA, "", "wrong-token-value")
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(msg_line("m1") + "\n")
+    stop_hook(tmp_path, tr)
+    st = stop_state(tmp_path)
+    assert stop_events(server) == [] and len(st["outbox"]) == 1 and st["next_try"] > time.time() and st["fails"] == 1    # refused: kept, with a pause
+    eid = st["outbox"][0]["event_id"]
+    identity.save_identity(server + "/exec", ADA, "", good["token"])
+    stop_hook(tmp_path, tr)
+    assert stop_events(server) == [] and len(stop_state(tmp_path)["outbox"]) == 1                                         # still inside the pause
+    age_state(tmp_path, next_try=0)
+    stop_hook(tmp_path, tr)
+    ev = stop_events(server)
+    assert len(ev) == 1 and stop_state(tmp_path)["outbox"] == [] and stop_state(tmp_path)["fails"] == 0
+    assert APIS[server].export("events", 0, 10)["rows"][0][1] == eid                                                       # the id that was kept is the id that arrived
+
+
+def test_nothing_is_collected_before_registration_or_when_switched_off(server, tmp_path):
+    setup(server, tmp_path)
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(msg_line("m1") + "\n")
+    stop_hook(tmp_path, tr)                                                           # not registered
+    assert stop_events(server) == [] and "pending" not in stop_state(tmp_path) and "outbox" not in stop_state(tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    tr.write_text(tr.read_text() + msg_line("m2") + "\n")
+    stop_hook(tmp_path, tr, {"CCKIT_TELEMETRY": "off"})
+    assert stop_events(server) == [] and (tmp_path / ".claude/token_usage.csv").exists()   # the CSV is still written locally
+
+
+def test_stop_report_can_be_turned_off_and_the_hook_stays_for_the_csv(server, tmp_path):
+    setup(server, tmp_path, extra="stop_report = false\n")
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(msg_line("m1") + "\n")
+    stop_hook(tmp_path, tr)
+    assert stop_events(server) == [] and len(read(tmp_path / ".claude/token_usage.csv").splitlines()) == 2
+
+
+def test_stop_hook_without_the_csv_still_reports(server, tmp_path):
+    setup(server, tmp_path)
+    cfg_text = read(tmp_path / "cckit.toml") + "\n[usage]\nlog = false\n"
+    (tmp_path / "cckit.toml").write_text(cfg_text)
+    apply.init(tmp_path)
+    s = json.loads(read(tmp_path / ".claude/settings.json"))
+    assert "Stop" in s["hooks"] and "Read(.claude/token_usage.csv)" not in s["permissions"]["deny"]
+    assert "/.claude/token_usage.csv.state.json" in read(tmp_path / ".gitignore")
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(msg_line("m1") + "\n")
+    stop_hook(tmp_path, tr)
+    assert len(stop_events(server)) == 1 and not (tmp_path / ".claude/token_usage.csv").exists()
+
+
+def test_stop_report_validation():
+    cfg = config.defaults()
+    cfg["telemetry"]["stop_report"] = "yes"
+    assert any("stop_report" in e for e in config.validate(cfg))

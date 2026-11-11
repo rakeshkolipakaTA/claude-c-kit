@@ -448,3 +448,10 @@ def test_managed_example_has_telemetry_and_limits():
     m = json.loads(render.build_managed_example(cfg))
     assert m["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1" and m["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://otel.corp:4317"
     assert m["availableModels"] == ["sonnet", "haiku"] and m["maxEffortLevel"] == "high"
+
+
+def test_python_dash_m_cckit_works(tmp_path):
+    import os, subprocess, sys
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    r = subprocess.run([sys.executable, "-m", "cckit", "--version"], capture_output=True, text=True, env={**os.environ, "PYTHONPATH": src})
+    assert r.returncode == 0 and r.stdout.startswith("cckit ")

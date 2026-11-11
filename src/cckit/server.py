@@ -224,14 +224,14 @@ class UsageApi:
                     "INSERT INTO events(received_at, event_id, email, github, trig, model, effort, claude_version, entrypoint, context_tokens, win, context_pct,"
                     " input_tokens, output_tokens, cache_read, cache_write, cache_hit_pct, requests, sub_requests, sub_output, tool_calls, models, tools,"
                     " session_minutes, compactions_before, project, branch, session, os, partial, client) VALUES(" + ",".join("?" * 31) + ")",
-                    (now_iso(), eid, email, row["github"], "manual" if b.get("trigger") == "manual" else "auto", s("model", 60), s("effort", 20),
+                    (now_iso(), eid, email, row["github"], b.get("trigger") if b.get("trigger") in ("manual", "stop") else "auto", s("model", 60), s("effort", 20),
                      s("claude_version", 20), s("entrypoint", 30), ctx, win, pct(ctx, win), inp, out, cr, cw, pct(cr, inp + cr + cw),
                      n("requests"), n("sub_requests"), n("sub_output"), n("tool_calls"), s("models", 300), s("tools", 300),
                      n("session_minutes", 1e6), n("compactions_before", 1e5), s("project", 80), s("branch", 80), s("session", 64), s("os", 20),
                      "Yes" if b.get("partial") else "", s("client", 40)))
             except sqlite3.IntegrityError:                          # the same event_id from another process, a moment ago
                 return {"ok": True, "duplicate": True}
-            c.execute("UPDATE users SET last_seen = ?, compactions = compactions + 1 WHERE email = ?", (now_iso(), email))
+            c.execute("UPDATE users SET last_seen = ?, compactions = compactions + ? WHERE email = ?", (now_iso(), 0 if b.get("trigger") == "stop" else 1, email))
             return {"ok": True}
 
     # ---------------------------------------------------------------- export (for the sheet) and admin

@@ -89,6 +89,7 @@ auto_register = true          # a SessionStart hook takes the developer's compan
                               # if it finds one) and registers them; if there is no company e-mail it asks Claude to ask the developer.
                               # Needs team_key. false = developers run `cckit register`
 events = ["auto"]             # which compactions to report: "auto", "manual"
+stop_report = true            # the Stop hook also reports token counts per model (the usage and cost numbers), at most once a minute. false = only the local CSV
 send_project = true           # include the repo folder name (never paths, prompts, code or summaries)
 
 [managed]                     # only used for .cckit/managed-settings.example.json (an admin deploys that file)
@@ -177,6 +178,11 @@ def identity_key(t: dict) -> str:
     return t.get("endpoint") or t.get("usage_url") or ""
 
 
+def stop_report_active(cfg: dict) -> bool:
+    """The Stop hook posts token counts to the usage API."""
+    return bool(telemetry_active(cfg) and cfg["telemetry"]["stop_report"])
+
+
 def telemetry_active(cfg: dict) -> bool:
     t = cfg["telemetry"]
     return bool(t["enabled"] and api_url(t, "register") and api_url(t, "usage"))
@@ -262,6 +268,8 @@ def validate(cfg: dict) -> list[str]:
     ev = tel.get("events")
     if not isinstance(ev, list) or not ev or not set(ev) <= {"auto", "manual"}:
         errs.append('[telemetry] events must be a non-empty list of "auto" and/or "manual"')
+    if not isinstance(tel.get("stop_report"), bool):
+        errs.append("[telemetry] stop_report must be true or false")
     for name, a in cfg.get("agents", {}).items():
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
             errs.append(f"[agents.{name}] the name must be lower-case letters, digits and hyphens")

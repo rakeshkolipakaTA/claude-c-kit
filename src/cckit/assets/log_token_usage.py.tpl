@@ -8,16 +8,35 @@ git-ignored (cckit init adds it to .gitignore). It prints nothing and never bloc
 Each run reads only what was added to the transcript since the last run (an offset per transcript in <csv>.state.json), and a message id is never
 written twice, so repeated Stop events, parallel sessions and a lost state file cannot create duplicates.
 Columns: timestamp, session_id, message_id, model, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, subagent (yes/no)
+
+Reporting (only when [telemetry] stop_report is on and this machine is registered): the same numbers are added up per model and sent to the team's
+usage API as trigger "stop" events, at most once a minute. An event holds the company e-mail and token, the model, the token counts since the previous
+event (main + subagents), request counts, the current context size, the repo folder name and the session id: no prompts, code or replies. Events
+that could not be delivered wait in the state file (at most 200, retried with a growing pause) and are sent with a fixed event id, so a retry
+never counts twice. Opt out on one machine with CCKIT_TELEMETRY=off.
 """
 import csv
 import io
 import json
 import os
 import sys
+import platform
 import time
+import urllib.request
+import uuid
 from pathlib import Path
 
 CSV_PATH = __CSV_PATH__
+WRITE_CSV = __WRITE_CSV__
+STOP_REPORT = __STOP_REPORT__
+ENDPOINT = __ENDPOINT__              # identifies the team's API in the identity file
+USAGE_URL = __USAGE_URL__
+WINDOW = __WINDOW__
+SEND_PROJECT = __SEND_PROJECT__
+FLUSH_EVERY = 60                     # seconds between events
+OUTBOX_MAX = 200
+SEND_AT_MOST = 5                     # events sent per run
+
 COLUMNS = ["timestamp", "session_id", "message_id", "model", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "subagent"]
 RECENT = 200            # message ids remembered in the state file, against a message split across two runs
 
@@ -130,6 +149,99 @@ def new_rows(path, force_sub, offsets, seen, session):
     return [r for mid, r in last.items() if mid not in known]
 
 
+# ------------------------------------------------------------------ reporting to the team's usage API
+def identity_path():
+    env = os.environ.get("CCKIT_IDENTITY_FILE")
+    if env:
+        return Path(env)
+    base = os.environ.get("XDG_CONFIG_HOME") or os.environ.get("APPDATA") or str(Path.home() / ".config")
+    return Path(base) / "cckit" / "identity.json"
+
+
+def load_identity():
+    rec = load_json(identity_path()).get(ENDPOINT)
+    return rec if isinstance(rec, dict) and rec.get("email") and rec.get("token") else None
+
+
+def add_pending(state, rows):
+    """Add the new rows to the per-model totals waiting for the next event."""
+    pend = state.get("pending") if isinstance(state.get("pending"), dict) else {}
+    for r in rows:
+        p = pend.setdefault(r[3], {"i": 0, "o": 0, "cw": 0, "cr": 0, "req": 0, "sreq": 0, "sout": 0, "ctx": 0, "session": ""})
+        p["i"] += r[4]
+        p["o"] += r[5]
+        p["cw"] += r[6]
+        p["cr"] += r[7]
+        p["session"] = r[1] or p["session"]
+        if r[8] == "yes":
+            p["sreq"] += 1
+            p["sout"] += r[5]
+        else:
+            p["req"] += 1
+            p["ctx"] = r[4] + r[6] + r[7]               # the prompt size of the newest main response = the context window in use
+    state["pending"] = pend
+
+
+def flush_pending(state, now, project):
+    """Turn the waiting totals into events (one per model, each with a fixed id) when a minute has passed since the last ones."""
+    pend = state.get("pending")
+    if not pend or now - float(state.get("last_flush") or 0) < FLUSH_EVERY:
+        return
+    box = state.get("outbox") if isinstance(state.get("outbox"), list) else []
+    for model, p in pend.items():
+        box.append({"event_id": uuid.uuid4().hex, "trigger": "stop", "model": model, "input_tokens": p["i"], "output_tokens": p["o"],
+                    "cache_read": p["cr"], "cache_write": p["cw"], "requests": p["req"], "sub_requests": p["sreq"], "sub_output": p["sout"],
+                    "context_tokens": p["ctx"], "window": WINDOW, "project": project, "session": p["session"], "os": platform.system(),
+                    "client": "cckit-stop/1"})
+    state["outbox"] = box[-OUTBOX_MAX:]
+    state["pending"] = {}
+    state["last_flush"] = now
+
+
+def post(url, payload, timeout):
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST",
+                                 headers={"Content-Type": "text/plain;charset=utf-8", "User-Agent": "cckit"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        d = json.loads(r.read().decode("utf-8", "replace"))
+    return d if isinstance(d, dict) else {}
+
+
+def send_outbox(csv_file, state_file, ident):
+    """Send the waiting events (outside the lock: the network must not hold up other sessions), then forget the delivered ones."""
+    state = load_json(state_file)
+    box = state.get("outbox") if isinstance(state.get("outbox"), list) else []
+    if not box or time.time() < float(state.get("next_try") or 0):
+        return
+    sent, failed, deadline = set(), False, time.time() + 9
+    for e in box[:SEND_AT_MOST]:
+        if time.time() > deadline:
+            break
+        try:
+            d = post(USAGE_URL, dict(e, v=1, email=ident["email"], token=ident["token"]), 4)
+        except Exception:
+            failed = True
+            break
+        if not d.get("ok"):
+            failed = True                               # rate limit, bad token, switched off...: keep the events and pause
+            break
+        sent.add(e["event_id"])
+    with Lock(csv_file) as lock:
+        if not lock.held:
+            return                                      # the events stay and are sent again with the same ids: the server ignores repeats
+        state = load_json(state_file)
+        state["outbox"] = [e for e in (state.get("outbox") or []) if e.get("event_id") not in sent]
+        fails = 0 if not failed else int(state.get("fails") or 0) + 1
+        state["fails"] = fails
+        state["next_try"] = 0 if not failed else time.time() + min(3600, 60 * 2 ** min(fails, 6))
+        write_state(state_file, state)
+
+
+def write_state(state_file, state):
+    tmp = state_file.with_name(state_file.name + ".%d.tmp" % os.getpid())
+    tmp.write_text(json.dumps(state), encoding="utf-8")
+    os.replace(tmp, state_file)
+
+
 CSV_FILE = [None]       # set in main(); a list so that new_rows can read it without another argument
 
 
@@ -168,7 +280,7 @@ def main():
                     continue
                 rows += got
                 seen |= {r[2] for r in got}
-            if rows:
+            if rows and WRITE_CSV:
                 buf = io.StringIO()
                 w = csv.writer(buf, lineterminator="\n")
                 if not csv_file.exists() or csv_file.stat().st_size == 0:
@@ -176,9 +288,14 @@ def main():
                 w.writerows(rows)
                 with open(csv_file, "a", encoding="utf-8", newline="") as f:
                     f.write(buf.getvalue())
-            tmp = state_file.with_name(state_file.name + ".%d.tmp" % os.getpid())
-            tmp.write_text(json.dumps({"offsets": offsets, "recent": (recent + [r[2] for r in rows])[-RECENT:]}), encoding="utf-8")
-            os.replace(tmp, state_file)
+            ident = load_identity() if STOP_REPORT and USAGE_URL and os.environ.get("CCKIT_TELEMETRY", "").lower() not in ("off", "0", "false", "no") else None
+            state["offsets"], state["recent"] = offsets, (recent + [r[2] for r in rows])[-RECENT:]
+            if ident:                                       # nothing is collected for sending until this machine is registered
+                add_pending(state, rows)
+                flush_pending(state, time.time(), os.path.basename(str(root).rstrip("/\\")) if SEND_PROJECT else "")
+            write_state(state_file, state)
+        if ident:
+            send_outbox(csv_file, state_file, ident)
     except Exception:
         pass
 

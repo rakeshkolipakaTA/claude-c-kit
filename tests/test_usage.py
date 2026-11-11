@@ -84,7 +84,7 @@ def test_csv_and_state_are_gitignored_and_user_lines_survive(repo):
 def test_gitignore_is_created_when_missing_and_block_removed_when_logging_is_turned_off(repo):
     apply.init(repo)
     assert (repo / ".gitignore").exists()
-    (repo / "cckit.toml").write_text("[usage]\nlog = false\n")
+    (repo / "cckit.toml").write_text("[usage]\nlog = false\n[telemetry]\nenabled = false\n")   # no CSV and no reporting: the Stop hook has nothing to do
     apply.init(repo)
     assert not (repo / ".gitignore").exists()                                       # only our block was in it: the file we created goes away
     assert not (repo / ".claude/hooks/log_token_usage.py").exists()
@@ -95,7 +95,7 @@ def test_gitignore_is_created_when_missing_and_block_removed_when_logging_is_tur
 def test_turning_the_log_off_keeps_the_users_own_gitignore_lines(repo):
     (repo / ".gitignore").write_text("dist/\n")
     apply.init(repo)
-    (repo / "cckit.toml").write_text("[usage]\nlog = false\n")
+    (repo / "cckit.toml").write_text("[usage]\nlog = false\n[telemetry]\nenabled = false\n")   # no CSV and no reporting: the Stop hook has nothing to do
     apply.init(repo)
     assert read(repo / ".gitignore").strip() == "dist/"
 

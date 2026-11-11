@@ -80,6 +80,11 @@ def build_allow(cfg: dict) -> list[str]:
     return [f"Bash(python3 {REPORT_SCRIPT}:*)".replace("python3", cfg["hooks"]["python"])] if cfg["usage"]["scripts"] else []
 
 
+def stop_hook_on(cfg: dict) -> bool:
+    """The Stop / SubagentStop hook is needed for the local CSV, for posting usage to the team app, or both."""
+    return bool(cfg["usage"]["log"] or config.stop_report_active(cfg))
+
+
 def log_hook_entry(cfg: dict) -> dict:
     """Stop / SubagentStop: append token counts to the local CSV. Synchronous on purpose: a background hook is killed when a headless run
     (`claude -p`, the SDK) exits right after the last response, and this one only reads the new transcript lines (milliseconds). Prints nothing."""
@@ -102,7 +107,7 @@ def build_settings(cfg: dict) -> dict:
     hooks: dict = {}
     if cfg["hooks"]["trim_test_output"]:
         hooks["PreToolUse"] = [hook_entry(cfg)]
-    if cfg["usage"]["log"]:
+    if stop_hook_on(cfg):
         hooks["Stop"] = [log_hook_entry(cfg)]
         hooks["SubagentStop"] = [log_hook_entry(cfg)]
     if config.telemetry_active(cfg):
@@ -131,7 +136,14 @@ def render_trim_script(cfg: dict) -> str:
 
 
 def render_log_script(cfg: dict) -> str:
-    return asset("log_token_usage.py.tpl").replace("__CSV_PATH__", json.dumps(cfg["usage"]["csv_path"].replace("\\", "/")))
+    t = cfg["telemetry"]
+    return (asset("log_token_usage.py.tpl").replace("__CSV_PATH__", json.dumps(cfg["usage"]["csv_path"].replace("\\", "/")))
+            .replace("__WRITE_CSV__", "True" if cfg["usage"]["log"] else "False")
+            .replace("__STOP_REPORT__", "True" if config.stop_report_active(cfg) else "False")
+            .replace("__ENDPOINT__", json.dumps(config.identity_key(t)))
+            .replace("__USAGE_URL__", json.dumps(config.api_url(t, "usage")))
+            .replace("__WINDOW__", str(cfg["context"]["auto_compact_window"]))
+            .replace("__SEND_PROJECT__", "True" if t["send_project"] else "False"))
 
 
 def clean_prices(cfg: dict) -> dict:
@@ -152,8 +164,8 @@ def build_usage_command() -> str:
 
 
 def build_gitignore_block(cfg: dict) -> str | None:
-    """Lines that keep the local usage log out of git (None when logging is off)."""
-    if not cfg["usage"]["log"]:
+    """Lines that keep the local usage log and the hook's state file out of git (None when the Stop hook is off)."""
+    if not stop_hook_on(cfg):
         return None
     p = cfg["usage"]["csv_path"].replace("\\", "/")
     p = p[2:] if p.startswith("./") else p
