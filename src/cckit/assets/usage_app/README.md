@@ -86,7 +86,7 @@ Keep **one worker process**; threads are fine. (SQLite handles several processes
 
 Platforms whose containers have no persistent disk (a default Cloud Run service) lose every row on restart: attach a volume or use a VM.
 
-3. Check it: `curl "https://usage.example.com/?api=ping"`. Then in each repo's `cckit.toml` set `endpoint = "https://usage.example.com/"` and `team_key`, run `cckit init`; `cckit whoami --check` should say `check: ok`.
+3. Check it: `curl "https://usage.example.com/?api=ping"`. Then in each repo's `.cckit/cckit.toml` set `endpoint = "https://usage.example.com/"`, put the team key in `.cckit/key.json` as `{"key": "..."}`, run `cckit init`; `cckit whoami --check` should say `check: ok`.
 
 ## Running it
 | Task | Command (same `CCKIT_DB`) |

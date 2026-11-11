@@ -6,7 +6,7 @@ Rules:
     unless --force;
   * CLAUDE.md: only the text between the cckit markers is managed, the rest is yours;
   * .claude/settings.json: keys are merged. Values you set yourself win unless --force, lists are unioned, and what
-    cckit added earlier is removed first so a changed cckit.toml does not leave stale entries behind.
+    cckit added earlier is removed first so a changed .cckit/cckit.toml does not leave stale entries behind.
 """
 from __future__ import annotations
 
@@ -121,7 +121,7 @@ def merge_settings(existing: dict, desired: dict, prev: dict, force: bool) -> tu
         elif s[k] == desired[k]:
             owned["scalars"][k] = desired[k]
         else:
-            notes.append(f"kept your '{k}' ({json.dumps(s[k])}); cckit.toml wants {json.dumps(desired[k])}. Use --force to replace it.")
+            notes.append(f"kept your '{k}' ({json.dumps(s[k])}); .cckit/cckit.toml wants {json.dumps(desired[k])}. Use --force to replace it.")
 
     # 3. environment variables
     env = s.setdefault("env", {})
@@ -132,7 +132,7 @@ def merge_settings(existing: dict, desired: dict, prev: dict, force: bool) -> tu
         elif env[k] == v:
             owned["env"][k] = v
         else:
-            notes.append(f"kept your env {k}={env[k]!r}; cckit.toml wants {v!r}. Use --force to replace it.")
+            notes.append(f"kept your env {k}={env[k]!r}; .cckit/cckit.toml wants {v!r}. Use --force to replace it.")
     if not env:
         del s["env"]
 
@@ -173,14 +173,48 @@ def _write(path: Path, text: str, executable: bool = False) -> None:
         path.chmod(0o755)
 
 
+def _move_team_key(root: Path, cfg_path: Path, cfg: dict, res: Result) -> None:
+    """Before 0.2.2 the team key could sit in the config as `team_key = "..."`. It belongs in .cckit/key.json: move it there and drop the line."""
+    import re
+    text = cfg_path.read_text(encoding="utf-8")
+    m = re.search(r'(?m)^team_key\s*=\s*"([^"]*)"[^\n]*\n?', text)
+    if not m or not m.group(1):
+        return
+    key = m.group(1)
+    if not (root / config.KEY_NAME).exists() and not config.save_key(root, key):
+        return                                              # a value cckit will not store: leave the config alone
+    cfg_path.write_text(text[: m.start()] + text[m.end():], encoding="utf-8", newline="\n")
+    res.add("moved", f"team_key -> {config.KEY_NAME}", "the key is no longer kept in the config")
+
+
+OLD_CSV = ".claude/token_usage.csv"           # the default location before 0.2.2
+
+
+def _move_default_csv(root: Path, cfg_path: Path, res: Result) -> None:
+    """A config written by an older version spells out csv_path = ".claude/token_usage.csv". That was the default, not a choice: switch it to the
+    new default and move the log (and its state file) along, so that every cckit file ends up in .cckit/. A path the user chose is left alone."""
+    import re
+    text = cfg_path.read_text(encoding="utf-8")
+    new_text, n = re.subn(r'(?m)^(csv_path\s*=\s*)"\.claude/token_usage\.csv"', lambda m: f'{m.group(1)}"{config.DEFAULT_CSV}"', text, count=1)
+    if not n:
+        return
+    cfg_path.write_text(new_text, encoding="utf-8", newline="\n")
+    for suffix in ("", ".state.json"):
+        old, new = root / (OLD_CSV + suffix), root / (config.DEFAULT_CSV + suffix)
+        if old.exists() and not new.exists():
+            new.parent.mkdir(parents=True, exist_ok=True)
+            old.replace(new)
+    res.add("moved", f"{OLD_CSV} -> {config.DEFAULT_CSV}", "the local usage log now lives in .cckit/")
+
+
 def init(root: Path, force: bool = False, dry_run: bool = False) -> Result:
     root = Path(root)
     res = Result()
     cfg_path = root / config.CONFIG_NAME
-    cfg = config.load(root)                                  # defaults when cckit.toml does not exist yet
+    cfg = config.load(root)                                  # defaults when .cckit/cckit.toml does not exist yet
     errors = config.validate(cfg)
     if errors:
-        raise ValueError("cckit.toml has problems:\n  - " + "\n  - ".join(errors))
+        raise ValueError(".cckit/cckit.toml has problems:\n  - " + "\n  - ".join(errors))
 
     # Preflight: everything that can make init refuse is checked BEFORE the first file is written, so a refusal changes nothing at all.
     cm = claude_md_path(root)
@@ -198,10 +232,25 @@ def init(root: Path, force: bool = False, dry_run: bool = False) -> Result:
         if not isinstance(existing, dict):
             raise ValueError(f"{SETTINGS} must contain a JSON object; nothing was changed.")
 
-    if not cfg_path.exists():
+    legacy = root / config.LEGACY_CONFIG_NAME
+    if not cfg_path.exists() and legacy.exists():
+        res.add("moved", f"{config.LEGACY_CONFIG_NAME} -> {config.CONFIG_NAME}", "all cckit files now live in .cckit/")
+        if not dry_run:
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy.replace(cfg_path)
+            _move_team_key(root, cfg_path, cfg, res)
+            _move_default_csv(root, cfg_path, res)
+            cfg = config.load(root)
+    elif not cfg_path.exists():
         res.add("created", config.CONFIG_NAME, "defaults; edit it and run init again")
         if not dry_run:
             _write(cfg_path, config.DEFAULT_TOML)
+    elif legacy.exists():
+        res.add("kept", config.LEGACY_CONFIG_NAME, f"an old copy: {config.CONFIG_NAME} is the one in use; delete this file")
+    elif cfg_path.exists() and not dry_run:
+        _move_team_key(root, cfg_path, cfg, res)
+        _move_default_csv(root, cfg_path, res)
+        cfg = config.load(root)
 
     manifest = load_manifest(root)
     new_files: dict[str, str] = {}
@@ -233,9 +282,14 @@ def init(root: Path, force: bool = False, dry_run: bool = False) -> Result:
             continue
         p = root / rel
         if p.exists() and sha(p.read_text(encoding="utf-8")) == h:
-            res.add("removed", rel, "no longer in cckit.toml")
+            res.add("removed", rel, "no longer in .cckit/cckit.toml")
             if not dry_run:
                 p.unlink()
+                for d in (p.parent, p.parent.parent):          # a folder this leaves empty (.claude/hooks after a move to .cckit/hooks) goes too
+                    try:
+                        d.rmdir()
+                    except OSError:
+                        break
         elif p.exists():
             res.add("kept", rel, "no longer generated, but you edited it")
 

@@ -14,7 +14,7 @@ name and git branch. NEVER sent: prompts, code, file paths, tool inputs or outpu
 It never blocks Claude Code (PreCompact runs in the background), prints nothing on PreCompact (that output would become part of the
 compaction instructions) and fails silently. Opt out on one machine with the environment variable CCKIT_TELEMETRY=off.
 Manual registration: python3 compact_report.py --register FIRSTNAME.LASTNAME@COMPANY.COM [--github LOGIN]
-Edit cckit.toml and run `cckit init` to change anything here.
+Edit .cckit/cckit.toml and run `cckit init` to change anything here.
 """
 import json
 import os
@@ -33,7 +33,7 @@ ENDPOINT = __ENDPOINT__              # identifies this team's API on this machin
 REGISTER_URL = __REGISTER_URL__
 USAGE_URL = __USAGE_URL__
 DOMAINS = __DOMAINS__
-TEAM_KEY = __TEAM_KEY__              # a join code, not a password: it is also in cckit.toml. Empty = no automatic registration
+AUTO_REGISTER = __AUTO_REGISTER__    # .cckit/cckit.toml [telemetry] auto_register
 TRIGGERS = __TRIGGERS__
 WINDOW = __WINDOW__
 SEND_PROJECT = __SEND_PROJECT__
@@ -55,6 +55,16 @@ def identity_path():
         return Path(env)
     base = os.environ.get("XDG_CONFIG_HOME") or os.environ.get("APPDATA") or str(Path.home() / ".config")
     return Path(base) / "cckit" / "identity.json"
+
+
+def team_key():
+    """The join code: $CCKIT_TEAM_KEY, else .cckit/key.json ({"key": "..."}) in the project. Read at run time, so it is never copied into this script."""
+    if not AUTO_REGISTER:
+        return ""
+    k = os.environ.get("CCKIT_TEAM_KEY", "")
+    if not k:
+        k = read_json(Path(os.environ.get("CLAUDE_PROJECT_DIR") or ".") / ".cckit" / "key.json").get("key", "")
+    return k if isinstance(k, str) else ""
 
 
 def read_json(p):
@@ -145,7 +155,7 @@ def register(email, github):
     if not email_ok(email):
         return False, "email must be a %s address" % " or ".join("@" + d for d in DOMAINS)
     try:
-        d = post(REGISTER_URL, {"v": 1, "email": email.strip().lower(), "github": github or "", "team_key": TEAM_KEY}, 15)
+        d = post(REGISTER_URL, {"v": 1, "email": email.strip().lower(), "github": github or "", "team_key": team_key()}, 15)
     except Exception as e:
         return False, "could not reach the usage endpoint (%s)" % getattr(e, "reason", e)
     if d.get("ok") and d.get("token"):
@@ -164,7 +174,7 @@ def env_int(name, lo, hi):
 
 def effective_window():
     """The context window auto-compaction works with on this machine: what Claude Code was started with (CLAUDE_CODE_AUTO_COMPACT_WINDOW, from
-    settings.json or the developer's own environment), else the value in cckit.toml. A developer who changed it is reported with their number."""
+    settings.json or the developer's own environment), else the value in .cckit/cckit.toml. A developer who changed it is reported with their number."""
     return env_int("CLAUDE_CODE_AUTO_COMPACT_WINDOW", 10_000, 10_000_000) or WINDOW
 
 
@@ -297,7 +307,7 @@ def auto_register(cwd):
 
 
 def session_start(data):
-    if load_identity() or not TEAM_KEY:
+    if load_identity() or not team_key():
         return
     cwd = str(data.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or "")
     ok, note, ask = auto_register(cwd)
@@ -330,7 +340,7 @@ def main():
             session_start(data)
         elif event == "PreCompact":
             ident = load_identity()
-            if not ident and TEAM_KEY:                  # the session started before registration was possible: try once more
+            if not ident and team_key():                  # the session started before registration was possible: try once more
                 if auto_register(str(data.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or ""))[0]:
                     ident = load_identity()
             if ident:

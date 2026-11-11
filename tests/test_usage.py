@@ -48,13 +48,13 @@ def write(path, lines):
 
 def hook(repo, tpath, event="Stop", sid="sess-1", extra_env=None, key="transcript_path"):
     payload = {"session_id": sid, "hook_event_name": event, "cwd": str(repo), key: str(tpath)}
-    p = subprocess.run([sys.executable, str(repo / ".claude/hooks/log_token_usage.py")], input=json.dumps(payload), capture_output=True, text=True,
+    p = subprocess.run([sys.executable, str(repo / ".cckit/hooks/log_token_usage.py")], input=json.dumps(payload), capture_output=True, text=True,
                        env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo), **(extra_env or {})}, timeout=30)
     assert p.returncode == 0 and p.stdout == "" and p.stderr == ""            # silent: a Stop hook must not talk
     return p
 
 
-def rows(repo, rel=".claude/token_usage.csv"):
+def rows(repo, rel=".cckit/token_usage.csv"):
     f = repo / rel
     return list(csv.DictReader(f.open(encoding="utf-8"))) if f.exists() else []
 
@@ -65,9 +65,9 @@ def test_defaults_install_the_log_hook_scripts_command_and_allow_rule(repo):
     s = json.loads(read(repo / ".claude/settings.json"))
     for ev in ("Stop", "SubagentStop"):
         h = s["hooks"][ev][0]["hooks"][0]
-        assert h["args"] == ["${CLAUDE_PROJECT_DIR}/.claude/hooks/log_token_usage.py"] and "async" not in h      # synchronous: headless runs would kill a background hook
-    assert "Bash(python3 .claude/scripts/usage_report.py:*)" in s["permissions"]["allow"]
-    assert (repo / ".claude/scripts/usage_report.py").exists() and (repo / ".claude/commands/usage.md").exists()
+        assert h["args"] == ["${CLAUDE_PROJECT_DIR}/.cckit/hooks/log_token_usage.py"] and "async" not in h      # synchronous: headless runs would kill a background hook
+    assert "Bash(python3 .cckit/scripts/usage_report.py:*)" in s["permissions"]["allow"]
+    assert (repo / ".cckit/scripts/usage_report.py").exists() and (repo / ".claude/commands/usage.md").exists()
     assert "usage_report.py" in read(repo / "CLAUDE.md") and "Do not estimate them yourself" in read(repo / "CLAUDE.md")
 
 
@@ -75,7 +75,7 @@ def test_csv_and_state_are_gitignored_and_user_lines_survive(repo):
     (repo / ".gitignore").write_text("node_modules/\n.env\n")
     apply.init(repo)
     gi = read(repo / ".gitignore")
-    assert gi.startswith("node_modules/\n.env\n") and "/.claude/token_usage.csv\n" in gi and "/.claude/token_usage.csv.state.json\n" in gi
+    assert gi.startswith("node_modules/\n.env\n") and "/.cckit/token_usage.csv\n" in gi and "/.cckit/token_usage.csv.state.json\n" in gi
     apply.init(repo)
     assert read(repo / ".gitignore") == gi                                          # idempotent: one block, not two
     assert gi.count("cckit:begin") == 1
@@ -84,10 +84,10 @@ def test_csv_and_state_are_gitignored_and_user_lines_survive(repo):
 def test_gitignore_is_created_when_missing_and_block_removed_when_logging_is_turned_off(repo):
     apply.init(repo)
     assert (repo / ".gitignore").exists()
-    (repo / "cckit.toml").write_text("[usage]\nlog = false\n[telemetry]\nenabled = false\n")   # no CSV and no reporting: the Stop hook has nothing to do
+    (repo / ".cckit/cckit.toml").write_text("[usage]\nlog = false\n[telemetry]\nenabled = false\n")   # no CSV and no reporting: the Stop hook has nothing to do
     apply.init(repo)
     assert not (repo / ".gitignore").exists()                                       # only our block was in it: the file we created goes away
-    assert not (repo / ".claude/hooks/log_token_usage.py").exists()
+    assert not (repo / ".cckit/hooks/log_token_usage.py").exists()
     s = json.loads(read(repo / ".claude/settings.json"))
     assert "Stop" not in s["hooks"] and "SubagentStop" not in s["hooks"]
 
@@ -95,15 +95,15 @@ def test_gitignore_is_created_when_missing_and_block_removed_when_logging_is_tur
 def test_turning_the_log_off_keeps_the_users_own_gitignore_lines(repo):
     (repo / ".gitignore").write_text("dist/\n")
     apply.init(repo)
-    (repo / "cckit.toml").write_text("[usage]\nlog = false\n[telemetry]\nenabled = false\n")   # no CSV and no reporting: the Stop hook has nothing to do
+    (repo / ".cckit/cckit.toml").write_text("[usage]\nlog = false\n[telemetry]\nenabled = false\n")   # no CSV and no reporting: the Stop hook has nothing to do
     apply.init(repo)
     assert read(repo / ".gitignore").strip() == "dist/"
 
 
 def test_custom_csv_path_is_used_everywhere(repo):
-    (repo / "cckit.toml").write_text('[usage]\ncsv_path = "logs/tokens.csv"\n')
+    (repo / ".cckit/cckit.toml").write_text('[usage]\ncsv_path = "logs/tokens.csv"\n')
     apply.init(repo)
-    assert 'CSV_PATH = "logs/tokens.csv"' in read(repo / ".claude/hooks/log_token_usage.py")
+    assert 'CSV_PATH = "logs/tokens.csv"' in read(repo / ".cckit/hooks/log_token_usage.py")
     assert "/logs/tokens.csv\n/logs/tokens.csv.state.json" in read(repo / ".gitignore")
 
 
@@ -118,8 +118,8 @@ def test_users_own_allow_rules_survive_and_ours_is_taken_back(repo):
     (repo / ".claude").mkdir()
     (repo / ".claude/settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(npm test)"]}}))
     apply.init(repo)
-    assert json.loads(read(repo / ".claude/settings.json"))["permissions"]["allow"] == ["Bash(npm test)", "Bash(python3 .claude/scripts/usage_report.py:*)"]
-    (repo / "cckit.toml").write_text("[usage]\nscripts = false\n")
+    assert json.loads(read(repo / ".claude/settings.json"))["permissions"]["allow"] == ["Bash(npm test)", "Bash(python3 .cckit/scripts/usage_report.py:*)"]
+    (repo / ".cckit/cckit.toml").write_text("[usage]\nscripts = false\n")
     apply.init(repo)
     assert json.loads(read(repo / ".claude/settings.json"))["permissions"]["allow"] == ["Bash(npm test)"]
 
@@ -146,7 +146,7 @@ def test_stop_hook_logs_new_responses_once_with_final_counts(repo, tmp_path):
     assert (r[0]["input_tokens"], r[0]["output_tokens"], r[0]["cache_write_tokens"], r[0]["cache_read_tokens"], r[0]["subagent"]) == ("10", "50", "20", "100", "no")
     assert r[1]["subagent"] == "yes" and r[1]["model"] == "claude-haiku-5-5" and r[0]["session_id"] == "sess-1"
     assert list(r[0]) == ["timestamp", "session_id", "message_id", "model", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "subagent"]
-    assert "SECRET" not in read(repo / ".claude/token_usage.csv")
+    assert "SECRET" not in read(repo / ".cckit/token_usage.csv")
     hook(repo, tr)
     hook(repo, tr)
     assert len(rows(repo)) == 2                                                     # repeated Stop events add nothing
@@ -166,7 +166,7 @@ def test_stop_hook_survives_a_lost_state_file_without_duplicates(repo, tmp_path)
     apply.init(repo)
     tr = write(tmp_path / "t.jsonl", [A("m1"), A("m2")])
     hook(repo, tr)
-    (repo / ".claude/token_usage.csv.state.json").unlink()
+    (repo / ".cckit/token_usage.csv.state.json").unlink()
     hook(repo, tr)
     assert [x["message_id"] for x in rows(repo)] == ["m1", "m2"]
 
@@ -214,7 +214,7 @@ def test_two_sessions_in_one_repo_do_not_mix_or_duplicate(repo, tmp_path):
 def test_parallel_hooks_write_every_row_once(repo, tmp_path):
     apply.init(repo)
     files = [write(tmp_path / f"s{i}.jsonl", [A(f"s{i}m{j}", sid=f"S{i}") for j in range(5)]) for i in range(6)]
-    procs = [subprocess.Popen([sys.executable, str(repo / ".claude/hooks/log_token_usage.py")], stdin=subprocess.PIPE, text=True,
+    procs = [subprocess.Popen([sys.executable, str(repo / ".cckit/hooks/log_token_usage.py")], stdin=subprocess.PIPE, text=True,
                               env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo)}) for _ in files]
     for i, p in enumerate(procs):
         p.stdin.write(json.dumps({"session_id": f"S{i}", "hook_event_name": "Stop", "cwd": str(repo), "transcript_path": str(files[i])}))
@@ -235,7 +235,7 @@ def test_stop_hook_opt_out_and_missing_transcript_are_silent(repo, tmp_path):
 
 def test_stop_hook_survives_garbage_input(repo):
     apply.init(repo)
-    p = subprocess.run([sys.executable, str(repo / ".claude/hooks/log_token_usage.py")], input="not json at all", capture_output=True, text=True)
+    p = subprocess.run([sys.executable, str(repo / ".cckit/hooks/log_token_usage.py")], input="not json at all", capture_output=True, text=True)
     assert p.returncode == 0 and p.stdout == "" and p.stderr == ""
 
 
@@ -248,7 +248,7 @@ def project_dir_for(home, repo):
 
 
 def report_run(repo, *args, env=None):
-    p = subprocess.run([sys.executable, str(repo / ".claude/scripts/usage_report.py"), *args], capture_output=True, text=True, cwd=str(repo),
+    p = subprocess.run([sys.executable, str(repo / ".cckit/scripts/usage_report.py"), *args], capture_output=True, text=True, cwd=str(repo),
                        env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo), **(env or {})}, timeout=60)
     assert p.returncode == 0, p.stderr
     return p.stdout
@@ -309,7 +309,7 @@ def test_report_json_is_machine_readable_and_counts_each_message_once(repo, home
 
 
 def test_report_prices_come_from_cckit_toml(repo, home):
-    (repo / "cckit.toml").write_text('[prices.sonnet]\ninput = 3.0\noutput = 15.0\ncache_read = 0.3\ncache_write = 3.75\n')
+    (repo / ".cckit/cckit.toml").write_text('[prices.sonnet]\ninput = 3.0\noutput = 15.0\ncache_read = 0.3\ncache_write = 3.75\n')
     apply.init(repo)
     seed_sessions(home, repo)
     d = json.loads(report_run(repo, "--session", "sess-new", "--json"))[0]
@@ -328,7 +328,7 @@ def test_report_warns_when_context_is_getting_full(repo, home):
 
 def test_report_with_no_transcripts_says_so(repo, home):
     apply.init(repo)
-    p = subprocess.run([sys.executable, str(repo / ".claude/scripts/usage_report.py")], capture_output=True, text=True, cwd=str(repo),
+    p = subprocess.run([sys.executable, str(repo / ".cckit/scripts/usage_report.py")], capture_output=True, text=True, cwd=str(repo),
                        env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo)})
     assert "No Claude Code transcripts found" in p.stdout
 
@@ -352,21 +352,21 @@ def test_report_only_prints_numbers_and_tool_names(repo, home):
 def test_usage_command_runs_the_report_scripts_with_a_narrow_permission(repo):
     apply.init(repo)
     cmd = read(repo / ".claude/commands/usage.md")
-    assert "allowed-tools: Bash(python3 .claude/scripts/usage_report.py:*)" in cmd and "!`python3 .claude/scripts/usage_report.py`" in cmd
+    assert "allowed-tools: Bash(python3 .cckit/scripts/usage_report.py:*)" in cmd and "!`python3 .cckit/scripts/usage_report.py`" in cmd
     assert "--session all --days 7" in cmd
 
 
 def test_generated_scripts_run_on_old_pythons_grammar(repo):
     import ast
     apply.init(repo)
-    for rel in (".claude/hooks/log_token_usage.py", ".claude/scripts/usage_report.py"):
+    for rel in (".cckit/hooks/log_token_usage.py", ".cckit/scripts/usage_report.py"):
         ast.parse(read(repo / rel), feature_version=(3, 8))
 
 
 # ------------------------------------------------------------------ the transcript is flushed a moment after Stop fires
 def load_log_module(repo):
     apply.init(repo)
-    spec = importlib.util.spec_from_file_location("log_token_usage_under_test", repo / ".claude/hooks/log_token_usage.py")
+    spec = importlib.util.spec_from_file_location("log_token_usage_under_test", repo / ".cckit/hooks/log_token_usage.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -441,22 +441,22 @@ def test_subagent_files_of_other_sessions_are_not_swept_in(repo, tmp_path):
 def test_many_parallel_first_runs_write_the_header_exactly_once(repo, tmp_path):
     apply.init(repo)
     files = [write(tmp_path / f"p{i}.jsonl", [A(f"p{i}m{j}", sid=f"P{i}") for j in range(4)]) for i in range(14)]
-    procs = [subprocess.Popen([sys.executable, str(repo / ".claude/hooks/log_token_usage.py")], stdin=subprocess.PIPE, text=True,
+    procs = [subprocess.Popen([sys.executable, str(repo / ".cckit/hooks/log_token_usage.py")], stdin=subprocess.PIPE, text=True,
                               env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo)}) for _ in files]
     for i, p in enumerate(procs):
         p.stdin.write(json.dumps({"session_id": f"P{i}", "hook_event_name": "Stop", "cwd": str(repo), "transcript_path": str(files[i])}))
         p.stdin.close()
     assert [p.wait(timeout=60) for p in procs] == [0] * 14
-    text = read(repo / ".claude/token_usage.csv")
+    text = read(repo / ".cckit/token_usage.csv")
     assert text.count("timestamp,session_id,message_id") == 1 and text.startswith("timestamp,")
     ids = [x["message_id"] for x in rows(repo)]
     assert len(ids) == 56 and len(set(ids)) == 56
-    assert not (repo / ".claude/token_usage.csv.lock").exists()                    # the lock is released
+    assert not (repo / ".cckit/token_usage.csv.lock").exists()                    # the lock is released
 
 
 def test_a_stale_lock_from_a_crashed_run_does_not_block_logging(repo, tmp_path):
     apply.init(repo)
-    lock = repo / ".claude/token_usage.csv.lock"
+    lock = repo / ".cckit/token_usage.csv.lock"
     lock.parent.mkdir(exist_ok=True)
     lock.write_text("")
     os.utime(lock, (time.time() - 60,) * 2)                                          # a minute old: its owner is long gone
@@ -467,7 +467,7 @@ def test_a_stale_lock_from_a_crashed_run_does_not_block_logging(repo, tmp_path):
 
 def test_a_held_lock_makes_the_run_skip_and_the_next_event_catches_up(repo, tmp_path):
     apply.init(repo)
-    lock = repo / ".claude/token_usage.csv.lock"
+    lock = repo / ".cckit/token_usage.csv.lock"
     lock.write_text("")                                                              # fresh lock: another run is busy
     tr = write(tmp_path / "t.jsonl", [A("m1")])
     t0 = time.time()
@@ -481,12 +481,12 @@ def test_a_held_lock_makes_the_run_skip_and_the_next_event_catches_up(repo, tmp_
 def test_gitignore_block_lists_csv_state_and_lock(repo):
     apply.init(repo)
     gi = read(repo / ".gitignore")
-    assert "/.claude/token_usage.csv\n/.claude/token_usage.csv.state.json\n/.claude/token_usage.csv.lock\n" in gi
+    assert "/.cckit/token_usage.csv\n/.cckit/token_usage.csv.state.json\n/.cckit/token_usage.csv.lock\n" in gi
 
 
 def test_claude_cannot_read_the_log_it_is_told_not_to_read(repo):
     apply.init(repo)
     deny = json.loads(read(repo / ".claude/settings.json"))["permissions"]["deny"]
-    assert "Read(.claude/token_usage.csv)" in deny and "Read(.claude/token_usage.csv.state.json)" in deny
+    assert "Read(.cckit/token_usage.csv)" in deny and "Read(.cckit/token_usage.csv.state.json)" in deny
     md = read(repo / "CLAUDE.md")
-    assert "never read it whole, use the report script" in md and ".claude/token_usage.csv" in md
+    assert "never read it whole, use the report script" in md and ".cckit/token_usage.csv" in md

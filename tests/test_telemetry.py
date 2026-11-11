@@ -65,7 +65,8 @@ def git_repo(path, email=None, gh_user=None):
 
 
 def write_cfg(repo, endpoint="http://127.0.0.1:9/exec", extra=""):
-    (repo / "cckit.toml").write_text(f'[telemetry]\nenabled = true\nendpoint = "{endpoint}"\nteam_key = "{KEY}"\n{extra}')
+    (repo / ".cckit/cckit.toml").write_text(f'[telemetry]\nenabled = true\nendpoint = "{endpoint}"\n{extra}')
+    (repo / ".cckit/key.json").write_text(json.dumps({"key": KEY}))
 
 
 # ------------------------------------------------------------------ config and generated files
@@ -77,30 +78,30 @@ def test_defaults_point_at_the_live_app_but_ship_no_team_key(tmp_path):
     assert config.api_url(cfg, "ping") == "https://claude-code-usage.hatchable.site/api/ping"
     apply.init(tmp_path)
     s = json.loads(read(tmp_path / ".claude/settings.json"))
-    assert "PreCompact" in s["hooks"] and "SessionStart" not in s["hooks"]          # nothing to register with yet: the start-up hook is not installed
-    assert all("team" not in read(p).lower() or "team_key" not in read(p) or 'TEAM_KEY = ""' in read(p) for p in (tmp_path / ".claude/hooks").glob("*.py"))
+    assert "PreCompact" in s["hooks"] and "SessionStart" in s["hooks"]              # the start-up hook reads the key at run time: it needs no key here
+    assert not (tmp_path / ".cckit/key.json").exists()                              # no key is created, let alone shipped
 
 
 def test_telemetry_switched_off_writes_no_reporting_hooks(tmp_path):
-    (tmp_path / "cckit.toml").write_text("[telemetry]\nenabled = false\n")
+    (tmp_path / ".cckit/cckit.toml").write_text("[telemetry]\nenabled = false\n")
     apply.init(tmp_path)
     s = json.loads(read(tmp_path / ".claude/settings.json"))
     assert "PreCompact" not in s["hooks"] and "SessionStart" not in s["hooks"]
-    assert not (tmp_path / ".claude/hooks/compact_report.py").exists()
+    assert not (tmp_path / ".cckit/hooks/compact_report.py").exists()
 
 
 def test_a_users_own_endpoint_wins_over_the_shipped_default_urls(tmp_path):
-    (tmp_path / "cckit.toml").write_text('[telemetry]\nendpoint = "https://mine.example.com/"\n')
+    (tmp_path / ".cckit/cckit.toml").write_text('[telemetry]\nendpoint = "https://mine.example.com/"\n')
     t = config.load(tmp_path)["telemetry"]
     assert (t["register_url"], t["usage_url"], t["ping_url"]) == ("", "", "")
     assert config.api_url(t, "register") == "https://mine.example.com/?api=register"
-    (tmp_path / "cckit.toml").write_text('[telemetry]\nendpoint = "https://mine.example.com/"\nusage_url = "https://other.example.com/u"\n')
+    (tmp_path / ".cckit/cckit.toml").write_text('[telemetry]\nendpoint = "https://mine.example.com/"\nusage_url = "https://other.example.com/u"\n')
     t = config.load(tmp_path)["telemetry"]
     assert t["usage_url"] == "https://other.example.com/u" and config.api_url(t, "register") == "https://mine.example.com/?api=register"
 
 
 def test_enabled_with_every_url_cleared_warns_and_writes_no_hook(tmp_path):
-    (tmp_path / "cckit.toml").write_text('[telemetry]\nenabled = true\nregister_url = ""\nusage_url = ""\n')
+    (tmp_path / ".cckit/cckit.toml").write_text('[telemetry]\nenabled = true\nregister_url = ""\nusage_url = ""\n')
     apply.init(tmp_path)
     assert "PreCompact" not in json.loads(read(tmp_path / ".claude/settings.json"))["hooks"]
     rep = doctor.run(tmp_path, check_claude=False)
@@ -148,7 +149,7 @@ def test_two_api_urls_derive_from_the_endpoint_and_can_be_overridden():
 def test_generated_hook_knows_both_urls_and_the_domain(tmp_path):
     write_cfg(tmp_path, endpoint="https://script.google.com/macros/s/X/exec")
     apply.init(tmp_path)
-    src = read(tmp_path / ".claude/hooks/compact_report.py")
+    src = read(tmp_path / ".cckit/hooks/compact_report.py")
     assert '"https://script.google.com/macros/s/X/exec?api=register"' in src and '"https://script.google.com/macros/s/X/exec?api=usage"' in src
     assert '["tigeranalytics.com"]' in src
     compile(src, "compact_report.py", "exec")
@@ -160,7 +161,7 @@ def test_hook_entry_shape_and_matcher(tmp_path):
     e = json.loads(read(tmp_path / ".claude/settings.json"))["hooks"]["PreCompact"][0]
     assert e["matcher"] == "auto"
     h = e["hooks"][0]
-    assert h["async"] is True and h["args"] == ["${CLAUDE_PROJECT_DIR}/.claude/hooks/compact_report.py"]
+    assert h["async"] is True and h["args"] == ["${CLAUDE_PROJECT_DIR}/.cckit/hooks/compact_report.py"]
     write_cfg(tmp_path, extra='events = ["auto", "manual"]\n')
     apply.init(tmp_path)
     assert "matcher" not in json.loads(read(tmp_path / ".claude/settings.json"))["hooks"]["PreCompact"][0]
@@ -173,15 +174,62 @@ def test_session_start_hook_is_registered_only_with_auto_register(tmp_path):
     assert e["matcher"] == "startup|resume" and "async" not in e["hooks"][0]       # synchronous: it may hand Claude a sentence
 
 
-def test_team_key_only_in_the_hook_script_and_only_with_auto_register(tmp_path):
+def test_team_key_lives_only_in_key_json_and_claude_may_not_read_it(tmp_path):
     write_cfg(tmp_path)
     apply.init(tmp_path)
-    holders = [p.name for p in (tmp_path / ".claude").rglob("*") if p.is_file() and KEY in read(p)]
-    assert holders == ["compact_report.py"]
+    holders = [str(p.relative_to(tmp_path)) for d in (".cckit", ".claude") for p in (tmp_path / d).rglob("*") if p.is_file() and KEY in read(p)]
+    assert holders == [".cckit/key.json"]                                          # not in the config, not copied into a hook script
+    assert json.loads(read(tmp_path / ".cckit/key.json")) == {"key": KEY}
+    assert "Read(.cckit/key.json)" in json.loads(read(tmp_path / ".claude/settings.json"))["permissions"]["deny"]
+    assert "SessionStart" in json.loads(read(tmp_path / ".claude/settings.json"))["hooks"]
     write_cfg(tmp_path, extra="auto_register = false\n")
     apply.init(tmp_path)
-    assert not any(KEY in read(p) for p in (tmp_path / ".claude").rglob("*") if p.is_file())
     assert "SessionStart" not in json.loads(read(tmp_path / ".claude/settings.json"))["hooks"]
+
+
+def test_a_team_key_in_the_old_config_moves_to_key_json_on_init(tmp_path):
+    (tmp_path / ".cckit/cckit.toml").write_text('[model]\ndefault = "haiku"\n\n[telemetry]\nenabled = true\nteam_key = "abcd1234"   # from admin\nevents = ["auto"]\n')
+    r = apply.init(tmp_path)
+    assert json.loads(read(tmp_path / ".cckit/key.json")) == {"key": "abcd1234"}
+    assert "team_key" not in read(tmp_path / ".cckit/cckit.toml") and 'default = "haiku"' in read(tmp_path / ".cckit/cckit.toml")
+    assert any("team_key -> .cckit/key.json" in ln for ln in r.lines)
+    assert config.load(tmp_path)["telemetry"]["team_key"] == "abcd1234"
+
+
+def test_key_json_wins_and_a_malformed_one_is_ignored(tmp_path):
+    (tmp_path / ".cckit/cckit.toml").write_text('[telemetry]\nteam_key = "fromtoml1"\n')
+    (tmp_path / ".cckit/key.json").write_text('{"key": "fromjson1"}')
+    assert config.load(tmp_path)["telemetry"]["team_key"] == "fromjson1"
+    for bad in ('not json', '[]', '{"key": 5}', '{"key": "a b"}', '{"team_key": "abcd1234"}'):
+        (tmp_path / ".cckit/key.json").write_text(bad)
+        assert config.read_key(tmp_path) == ""
+
+
+def test_the_old_root_config_is_read_and_then_moved_by_init(tmp_path):
+    (tmp_path / "cckit.toml").write_text('[model]\ndefault = "haiku"\n')
+    assert config.load(tmp_path)["model"]["default"] == "haiku"                      # still honoured before the move
+    assert "old place" in doctor.run(tmp_path, check_claude=False).render()
+    r = apply.init(tmp_path)
+    assert not (tmp_path / "cckit.toml").exists() and 'default = "haiku"' in read(tmp_path / ".cckit/cckit.toml")
+    assert any(ln.startswith("moved") and "cckit.toml -> .cckit/cckit.toml" in ln for ln in r.lines)
+    (tmp_path / "cckit.toml").write_text("[model]\ndefault = 'opus'\n")              # an old copy next to the new one: the new one wins, nothing is deleted
+    r2 = apply.init(tmp_path)
+    assert (tmp_path / "cckit.toml").exists() and config.load(tmp_path)["model"]["default"] == "haiku"
+    assert any(ln.startswith("kept") and "cckit.toml" in ln for ln in r2.lines)
+
+
+def test_files_written_by_an_older_version_are_moved_into_cckit(tmp_path):
+    apply.init(tmp_path)
+    for rel_new, rel_old in ((".cckit/hooks/log_token_usage.py", ".claude/hooks/log_token_usage.py"), (".cckit/scripts/usage_report.py", ".claude/scripts/usage_report.py")):
+        old = tmp_path / rel_old                                                    # pretend a 0.2.1 install: same content at the old path, listed in the manifest
+        old.parent.mkdir(parents=True, exist_ok=True)
+        old.write_text(read(tmp_path / rel_new))
+        m = json.loads(read(tmp_path / ".cckit/manifest.json"))
+        m["files"][rel_old] = apply.sha(read(old))
+        (tmp_path / ".cckit/manifest.json").write_text(json.dumps(m))
+    apply.init(tmp_path)
+    assert not (tmp_path / ".claude/hooks/log_token_usage.py").exists() and not (tmp_path / ".claude/scripts/usage_report.py").exists()
+    assert (tmp_path / ".cckit/hooks/log_token_usage.py").exists()
 
 
 def test_turning_telemetry_off_removes_hooks_and_script_keeps_user_hooks(tmp_path):
@@ -191,12 +239,12 @@ def test_turning_telemetry_off_removes_hooks_and_script_keeps_user_hooks(tmp_pat
     apply.init(tmp_path)
     s = json.loads(read(tmp_path / ".claude/settings.json"))
     assert len(s["hooks"]["PreCompact"]) == 2
-    (tmp_path / "cckit.toml").write_text("[telemetry]\nenabled = false\n")
+    (tmp_path / ".cckit/cckit.toml").write_text("[telemetry]\nenabled = false\n")
     apply.init(tmp_path)
     s = json.loads(read(tmp_path / ".claude/settings.json"))
     assert s["hooks"]["PreCompact"] == [{"hooks": [{"type": "command", "command": "mine.sh"}]}]
     assert "SessionStart" not in s["hooks"] and "PreToolUse" in s["hooks"]
-    assert not (tmp_path / ".claude/hooks/compact_report.py").exists()
+    assert not (tmp_path / ".cckit/hooks/compact_report.py").exists()
 
 
 def test_old_manifest_with_hook_flag_still_upgrades(tmp_path):
@@ -263,7 +311,7 @@ def load_script(tmp_path, **overrides):
     """The generated hook script as a module, so its detection can be compared with cckit.identity."""
     write_cfg(tmp_path)
     apply.init(tmp_path)
-    spec = importlib.util.spec_from_file_location("compact_report_under_test", tmp_path / ".claude/hooks/compact_report.py")
+    spec = importlib.util.spec_from_file_location("compact_report_under_test", tmp_path / ".cckit/hooks/compact_report.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     for k, v in overrides.items():
@@ -442,8 +490,8 @@ def devices(base, email):
 def run_hook(repo, tr, trigger="auto", extra_env=None, cwd=None):
     payload = {"session_id": "sess-1", "transcript_path": str(tr), "cwd": str(cwd or repo / "myproject"), "hook_event_name": "PreCompact",
                "trigger": trigger, "custom_instructions": "do not leak this"}
-    p = subprocess.run([sys.executable, str(repo / ".claude/hooks/compact_report.py")], input=json.dumps(payload), capture_output=True, text=True,
-                       env={**os.environ, **(extra_env or {})}, timeout=30)
+    p = subprocess.run([sys.executable, str(repo / ".cckit/hooks/compact_report.py")], input=json.dumps(payload), capture_output=True, text=True,
+                       env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo), **(extra_env or {})}, timeout=30)
     assert p.returncode == 0 and p.stdout == "" and p.stderr == ""     # silent: stdout would become compaction instructions
     return p
 
@@ -594,7 +642,7 @@ def test_hourly_event_limit(server, tmp_path):
 # ------------------------------------------------------------------ the SessionStart hook, end to end
 def session_start(repo, env_extra=None):
     payload = {"session_id": "s1", "cwd": str(repo), "hook_event_name": "SessionStart", "source": "startup"}
-    p = subprocess.run([sys.executable, str(repo / ".claude/hooks/compact_report.py")], input=json.dumps(payload), capture_output=True,
+    p = subprocess.run([sys.executable, str(repo / ".cckit/hooks/compact_report.py")], input=json.dumps(payload), capture_output=True,
                        text=True, env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo), **(env_extra or {})}, timeout=60)
     assert p.returncode == 0 and p.stderr == ""
     return json.loads(p.stdout) if p.stdout.strip() else None
@@ -628,7 +676,8 @@ def test_session_start_ignores_a_personal_git_email_and_asks(server, tmp_path):
 
 def test_script_register_command_accepts_a_company_email_only(server, tmp_path):
     setup(server, tmp_path)
-    cmd = lambda *a: subprocess.run([sys.executable, str(tmp_path / ".claude/hooks/compact_report.py"), *a], capture_output=True, text=True, env=os.environ)
+    cmd = lambda *a: subprocess.run([sys.executable, str(tmp_path / ".cckit/hooks/compact_report.py"), *a], capture_output=True, text=True,
+                                    env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path)})
     bad = cmd("--register", "ada@gmail.com")
     assert bad.returncode == 1 and "@tigeranalytics.com" in bad.stdout and "Claude_Users" not in dump(server)
     good = cmd("--register", ADA, "--github", "octocat")
@@ -1035,9 +1084,9 @@ def test_identity_key_is_the_endpoint_or_the_usage_url():
 
 
 def test_both_urls_without_an_endpoint_switch_telemetry_on(tmp_path):
-    (tmp_path / "cckit.toml").write_text('[telemetry]\nenabled = true\nregister_url = "https://app.example.com/api/register"\nusage_url = "https://app.example.com/api/usage"\nteam_key = "k"\n')
+    (tmp_path / ".cckit/cckit.toml").write_text('[telemetry]\nenabled = true\nregister_url = "https://app.example.com/api/register"\nusage_url = "https://app.example.com/api/usage"\nteam_key = "k"\n')
     apply.init(tmp_path)
-    src = read(tmp_path / ".claude/hooks/compact_report.py")
+    src = read(tmp_path / ".cckit/hooks/compact_report.py")
     assert '"https://app.example.com/api/register"' in src and '"https://app.example.com/api/usage"' in src
     assert 'ENDPOINT = "https://app.example.com/api/usage"' in src                  # the identity key
     s = json.loads(read(tmp_path / ".claude/settings.json"))
@@ -1046,7 +1095,7 @@ def test_both_urls_without_an_endpoint_switch_telemetry_on(tmp_path):
 
 
 def test_only_one_of_the_two_urls_is_not_enough(tmp_path):
-    (tmp_path / "cckit.toml").write_text('[telemetry]\nenabled = true\nregister_url = "https://app.example.com/api/register"\nusage_url = ""\n')
+    (tmp_path / ".cckit/cckit.toml").write_text('[telemetry]\nenabled = true\nregister_url = "https://app.example.com/api/register"\nusage_url = ""\n')
     apply.init(tmp_path)
     assert "PreCompact" not in json.loads(read(tmp_path / ".claude/settings.json"))["hooks"]
     assert any(lv == "warn" and "no URL is set" in t for lv, t in doctor.run(tmp_path, check_claude=False).items)
@@ -1060,7 +1109,7 @@ def test_changing_the_domain_means_a_new_identity_key(tmp_path):
 
 
 def test_end_to_end_with_path_style_urls_and_no_endpoint(server, tmp_path, capsys):
-    (tmp_path / "cckit.toml").write_text(f'[telemetry]\nenabled = true\nregister_url = "{server}/api/register"\nusage_url = "{server}/api/usage"\nteam_key = "{KEY}"\n')
+    (tmp_path / ".cckit/cckit.toml").write_text(f'[telemetry]\nenabled = true\nregister_url = "{server}/api/register"\nusage_url = "{server}/api/usage"\nteam_key = "{KEY}"\n')
     apply.init(tmp_path)
     assert cli.main(["whoami", str(tmp_path), "--check"]) == 0
     out = capsys.readouterr().out
@@ -1074,7 +1123,7 @@ def test_end_to_end_with_path_style_urls_and_no_endpoint(server, tmp_path, capsy
 
 @pytest.mark.skipif(not GIT, reason="needs git")
 def test_session_start_registers_through_path_style_urls(server, tmp_path):
-    (tmp_path / "cckit.toml").write_text(f'[telemetry]\nenabled = true\nregister_url = "{server}/api/register"\nusage_url = "{server}/api/usage"\nteam_key = "{KEY}"\n')
+    (tmp_path / ".cckit/cckit.toml").write_text(f'[telemetry]\nenabled = true\nregister_url = "{server}/api/register"\nusage_url = "{server}/api/usage"\nteam_key = "{KEY}"\n')
     apply.init(tmp_path)
     git_repo(tmp_path, email=ADA)
     assert "registered" in session_start(tmp_path)["systemMessage"]
@@ -1120,7 +1169,9 @@ def run_in_pty(args, inputs, timeout=90):
 
 def init_repo(tmp_path, server, email=ADA, toml_extra="", with_key=False):
     git_repo(tmp_path, email=email)
-    (tmp_path / "cckit.toml").write_text(f'[telemetry]\nenabled = true\nendpoint = "{server}/exec"\n' + (f'team_key = "{KEY}"\n' if with_key else "") + toml_extra)
+    (tmp_path / ".cckit/cckit.toml").write_text(f'[telemetry]\nenabled = true\nendpoint = "{server}/exec"\n' + toml_extra)
+    if with_key:
+        (tmp_path / ".cckit/key.json").write_text(json.dumps({"key": KEY}))
     return tmp_path
 
 
@@ -1133,17 +1184,16 @@ def test_init_asks_for_the_email_offering_the_git_one_then_for_the_team_key(serv
     assert "Team key (from your admin):" in out and f"Registered {ADA}" in out
     assert "Save the team key?" in out and "Not saved" in out
     assert identity.get_identity(server + "/exec")["email"] == ADA
-    assert KEY not in read(repo / "cckit.toml") and not any(KEY in read(p) for p in (repo / ".claude").rglob("*.py"))      # not saved: not committed
+    assert KEY not in read(repo / ".cckit/cckit.toml") and not any(KEY in read(p) for p in (repo / ".claude").rglob("*.py"))      # not saved: not committed
 
 
 @pytest.mark.skipif(not GIT, reason="needs git")
 def test_init_can_save_the_team_key_so_teammates_register_automatically(server, tmp_path):
     repo = init_repo(tmp_path, server)
     code, out = run_in_pty(["init", str(repo)], ["", KEY, "y"])
-    assert code == 0 and "Saved to cckit.toml; the hooks were regenerated" in out
-    assert f'team_key = "{KEY}"' in read(repo / "cckit.toml")
-    assert KEY in read(repo / ".claude/hooks/compact_report.py")
-    assert "SessionStart" in json.loads(read(repo / ".claude/settings.json"))["hooks"]          # now there is a key to register others with
+    assert code == 0 and "Saved to .cckit/key.json" in out
+    assert json.loads(read(repo / ".cckit/key.json")) == {"key": KEY}
+    assert KEY not in read(repo / ".cckit/cckit.toml") and not any(KEY in read(p) for p in (repo / ".claude").rglob("*.py")) and not any(KEY in read(p) for p in (repo / ".cckit/hooks").glob("*.py"))
     assert cli.main(["doctor", str(repo), "--no-claude"]) == 0
 
 
@@ -1177,7 +1227,7 @@ def test_init_with_no_company_email_in_git_asks_and_refuses_personal_addresses(s
 @pytest.mark.skipif(not GIT, reason="needs git")
 def test_init_tells_you_when_reporting_is_switched_off_and_asks_nothing(server, tmp_path):
     repo = init_repo(tmp_path, server, toml_extra="")
-    (repo / "cckit.toml").write_text(f'[telemetry]\nenabled = false\nendpoint = "{server}/exec"\n')
+    (repo / ".cckit/cckit.toml").write_text(f'[telemetry]\nenabled = false\nendpoint = "{server}/exec"\n')
     code, out = run_in_pty(["init", str(repo)], [])
     assert code == 0 and "Usage reporting to the team app is off ([telemetry] enabled = false" in out
     assert "Your company e-mail" not in out and identity.get_identity(server + "/exec") is None
@@ -1205,29 +1255,16 @@ def test_ctrl_d_at_the_prompt_skips_registration_and_init_still_succeeds(server,
     assert code == 0 and "Skipped" in out and (repo / ".claude/settings.json").exists()
 
 
-def test_save_team_key_replaces_the_value_and_keeps_comments_and_other_text(tmp_path):
-    (tmp_path / "cckit.toml").write_text('[model]\ndefault = "haiku"\n\n[telemetry]\nenabled = true\nteam_key = ""   # ask admin\nevents = ["auto"]\n')
-    assert cli._save_team_key(tmp_path, "abcd1234") is True
-    assert read(tmp_path / "cckit.toml") == '[model]\ndefault = "haiku"\n\n[telemetry]\nenabled = true\nteam_key = "abcd1234"   # ask admin\nevents = ["auto"]\n'
+def test_save_key_writes_key_json(tmp_path):
+    assert config.save_key(tmp_path, "abcd1234") is True
+    assert json.loads(read(tmp_path / ".cckit/key.json")) == {"key": "abcd1234"}
+    assert config.save_key(tmp_path, "efgh5678") is True and config.read_key(tmp_path) == "efgh5678"      # replaced
 
 
-def test_save_team_key_adds_the_line_or_the_section_when_missing(tmp_path):
-    (tmp_path / "cckit.toml").write_text('[telemetry]   # reporting\nenabled = true\n')
-    cli._save_team_key(tmp_path, "abcd1234")
-    assert config.load(tmp_path)["telemetry"]["team_key"] == "abcd1234" and "# reporting" in read(tmp_path / "cckit.toml")
-    (tmp_path / "cckit.toml").write_text('[model]\ndefault = "haiku"')
-    cli._save_team_key(tmp_path, "abcd1234")
-    assert config.load(tmp_path)["telemetry"]["team_key"] == "abcd1234" and config.load(tmp_path)["model"]["default"] == "haiku"
-    (tmp_path / "cckit.toml").unlink()
-    cli._save_team_key(tmp_path, "abcd1234")                                      # no file at all
-    assert config.load(tmp_path)["telemetry"]["team_key"] == "abcd1234"
-
-
-@pytest.mark.parametrize("bad", ['x"; evil = "1', "a b c d", "ab", "k\nteam_key = 'y'", "é" * 8])
-def test_save_team_key_refuses_text_that_could_break_the_file(tmp_path, bad):
-    (tmp_path / "cckit.toml").write_text('[telemetry]\nteam_key = ""\n')
-    assert cli._save_team_key(tmp_path, bad) is False
-    assert read(tmp_path / "cckit.toml") == '[telemetry]\nteam_key = ""\n'
+@pytest.mark.parametrize("bad", ['x"; evil = "1', "a b c d", "ab", "k\nteam_key = 'y'", "é" * 8, ""])
+def test_save_key_refuses_text_it_will_not_store(tmp_path, bad):
+    assert config.save_key(tmp_path, bad) is False
+    assert not (tmp_path / ".cckit/key.json").exists()
 
 
 # ------------------------------------------------------------------ an existing CLAUDE.md
@@ -1249,7 +1286,7 @@ def test_text_the_user_adds_around_the_block_survives_later_updates(tmp_path):
     apply.init(tmp_path)
     md = read(tmp_path / "CLAUDE.md").replace("## Deployment", "## Deployment (edited)") + "\n## Added later\nKeep PRs small.\n"
     (tmp_path / "CLAUDE.md").write_text(md)
-    (tmp_path / "cckit.toml").write_text("[usage]\nscripts = false\nlog = false\n")            # changes what the block says
+    (tmp_path / ".cckit/cckit.toml").write_text("[usage]\nscripts = false\nlog = false\n")            # changes what the block says
     apply.init(tmp_path)
     new = read(tmp_path / "CLAUDE.md")
     assert "## Deployment (edited)" in new and "## Added later\nKeep PRs small.\n" in new and "usage_report.py" not in new
@@ -1312,7 +1349,7 @@ def test_an_invalid_settings_json_stops_init_before_anything_is_written(tmp_path
     err = capsys.readouterr().err
     assert "not valid JSON" in err and "nothing was changed" in err
     assert sorted(p.name for p in (tmp_path / ".claude").iterdir()) == ["settings.json"] and read(tmp_path / "CLAUDE.md") == USER_MD
-    assert not (tmp_path / "cckit.toml").exists() and sorted(p.name for p in tmp_path.iterdir()) == before
+    assert not (tmp_path / ".cckit/cckit.toml").exists() and sorted(p.name for p in tmp_path.iterdir()) == before
 
 
 def test_a_dry_run_writes_nothing_even_with_an_existing_claude_md(tmp_path):
@@ -1341,7 +1378,7 @@ def test_the_managed_block_stays_short_and_tells_claude_about_the_scripts_and_th
     apply.init(tmp_path)
     md = read(tmp_path / "CLAUDE.md")
     assert len(md.splitlines()) < 30
-    assert "usage_report.py" in md and "Do not estimate them yourself" in md and ".claude/token_usage.csv" in md
+    assert "usage_report.py" in md and "Do not estimate them yourself" in md and ".cckit/token_usage.csv" in md
 
 
 # ------------------------------------------------------------------ cckit login: save e-mail + token in the home folder, then init
@@ -1352,7 +1389,7 @@ def test_login_saves_the_identity_outside_the_repo_and_runs_init(tmp_path, monke
     assert cli.main(["login", str(repo), "--email", "Ada.Lovelace@TigerAnalytics.com", "--token", "tok_ABCDEF123456"]) == 0
     key = config.identity_key(config.load(repo)["telemetry"])
     assert identity.get_identity(key) == {"email": ADA, "github": "", "token": "tok_ABCDEF123456"}
-    assert (repo / "cckit.toml").exists() and (repo / ".claude" / "settings.json").exists()       # init ran
+    assert (repo / ".cckit/cckit.toml").exists() and (repo / ".claude" / "settings.json").exists()       # init ran
     assert "tok_ABCDEF123456" not in "".join(p.read_text(errors="ignore") for p in repo.rglob("*") if p.is_file())   # the token is nowhere in the repo
     assert "not registered yet" not in capsys.readouterr().out                                    # init saw the login
 
@@ -1363,7 +1400,7 @@ def test_login_refuses_a_foreign_email_and_a_bad_token(tmp_path, monkeypatch, ca
     assert "@tigeranalytics.com" in capsys.readouterr().err
     assert cli.main(["login", str(tmp_path), "--email", ADA, "--token", "short"]) == 2
     assert "token" in capsys.readouterr().err
-    assert not (tmp_path / "cckit.toml").exists() and not identity.identity_path().exists()      # nothing written on a refusal
+    assert not (tmp_path / ".cckit/cckit.toml").exists() and not identity.identity_path().exists()      # nothing written on a refusal
 
 
 def test_login_prompts_with_hidden_token(tmp_path, monkeypatch, capsys):
@@ -1372,7 +1409,7 @@ def test_login_prompts_with_hidden_token(tmp_path, monkeypatch, capsys):
     asked = []
     monkeypatch.setattr("getpass.getpass", lambda prompt="": asked.append(prompt) or "tok_ABCDEF123456")
     assert cli.main(["login", str(tmp_path), "--no-init"]) == 0
-    assert asked and not (tmp_path / "cckit.toml").exists()                                       # --no-init: login only
+    assert asked and not (tmp_path / ".cckit/cckit.toml").exists()                                       # --no-init: login only
     assert identity.get_identity(config.identity_key(config.load(tmp_path)["telemetry"]))["token"] == "tok_ABCDEF123456"
 
 
@@ -1386,18 +1423,18 @@ def msg_line(mid, model="claude-sonnet-5-5", inp=10, out=50, cr=100, cw=20, side
 
 def stop_hook(repo, tr, extra_env=None):
     payload = {"session_id": "sess-1", "hook_event_name": "Stop", "cwd": str(repo), "transcript_path": str(tr)}
-    p = subprocess.run([sys.executable, str(repo / ".claude/hooks/log_token_usage.py")], input=json.dumps(payload), capture_output=True, text=True,
+    p = subprocess.run([sys.executable, str(repo / ".cckit/hooks/log_token_usage.py")], input=json.dumps(payload), capture_output=True, text=True,
                        env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo), **(extra_env or {})}, timeout=60)
     assert p.returncode == 0 and p.stdout == "" and p.stderr == ""
     return p
 
 
 def stop_state(repo):
-    return json.loads((repo / ".claude/token_usage.csv.state.json").read_text())
+    return json.loads((repo / ".cckit/token_usage.csv.state.json").read_text())
 
 
 def age_state(repo, **kv):
-    p = repo / ".claude/token_usage.csv.state.json"
+    p = repo / ".cckit/token_usage.csv.state.json"
     d = json.loads(p.read_text())
     d.update(kv)
     p.write_text(json.dumps(d))
@@ -1424,7 +1461,7 @@ def test_stop_hook_posts_per_model_totals_once(server, tmp_path):
     assert rows(server, "Claude_Users")[0]["Compactions"] == 0                         # Stop events are not compactions
     stop_hook(tmp_path, tr)                                                           # nothing new: nothing sent
     assert len(stop_events(server)) == 2
-    whole = json.dumps(dump(server)) + (tmp_path / ".claude/token_usage.csv.state.json").read_text()
+    whole = json.dumps(dump(server)) + (tmp_path / ".cckit/token_usage.csv.state.json").read_text()
     tok = identity.get_identity(server + "/exec")["token"]
     assert "SECRET" not in whole and tok not in whole                                 # no text from the conversation, and the token is not kept in the state file
 
@@ -1476,7 +1513,7 @@ def test_nothing_is_collected_before_registration_or_when_switched_off(server, t
     cli.main(["register", str(tmp_path), "--email", ADA])
     tr.write_text(tr.read_text() + msg_line("m2") + "\n")
     stop_hook(tmp_path, tr, {"CCKIT_TELEMETRY": "off"})
-    assert stop_events(server) == [] and (tmp_path / ".claude/token_usage.csv").exists()   # the CSV is still written locally
+    assert stop_events(server) == [] and (tmp_path / ".cckit/token_usage.csv").exists()   # the CSV is still written locally
 
 
 def test_stop_report_can_be_turned_off_and_the_hook_stays_for_the_csv(server, tmp_path):
@@ -1485,22 +1522,22 @@ def test_stop_report_can_be_turned_off_and_the_hook_stays_for_the_csv(server, tm
     tr = tmp_path / "t.jsonl"
     tr.write_text(msg_line("m1") + "\n")
     stop_hook(tmp_path, tr)
-    assert stop_events(server) == [] and len(read(tmp_path / ".claude/token_usage.csv").splitlines()) == 2
+    assert stop_events(server) == [] and len(read(tmp_path / ".cckit/token_usage.csv").splitlines()) == 2
 
 
 def test_stop_hook_without_the_csv_still_reports(server, tmp_path):
     setup(server, tmp_path)
-    cfg_text = read(tmp_path / "cckit.toml") + "\n[usage]\nlog = false\n"
-    (tmp_path / "cckit.toml").write_text(cfg_text)
+    cfg_text = read(tmp_path / ".cckit/cckit.toml") + "\n[usage]\nlog = false\n"
+    (tmp_path / ".cckit/cckit.toml").write_text(cfg_text)
     apply.init(tmp_path)
     s = json.loads(read(tmp_path / ".claude/settings.json"))
-    assert "Stop" in s["hooks"] and "Read(.claude/token_usage.csv)" not in s["permissions"]["deny"]
-    assert "/.claude/token_usage.csv.state.json" in read(tmp_path / ".gitignore")
+    assert "Stop" in s["hooks"] and "Read(.cckit/token_usage.csv)" not in s["permissions"]["deny"]
+    assert "/.cckit/token_usage.csv.state.json" in read(tmp_path / ".gitignore")
     cli.main(["register", str(tmp_path), "--email", ADA])
     tr = tmp_path / "t.jsonl"
     tr.write_text(msg_line("m1") + "\n")
     stop_hook(tmp_path, tr)
-    assert len(stop_events(server)) == 1 and not (tmp_path / ".claude/token_usage.csv").exists()
+    assert len(stop_events(server)) == 1 and not (tmp_path / ".cckit/token_usage.csv").exists()
 
 
 def test_stop_report_validation():
@@ -1521,7 +1558,7 @@ def test_turns_count_the_stop_hook_firings_once_per_batch(server, tmp_path):
     stop_hook(tmp_path, tr)
     assert stop_state(tmp_path)["stops"] == 2 and len(stop_events(server)) == 2
     sub = {"session_id": "sess-1", "hook_event_name": "SubagentStop", "cwd": str(tmp_path), "agent_transcript_path": str(tr)}
-    subprocess.run([sys.executable, str(tmp_path / ".claude/hooks/log_token_usage.py")], input=json.dumps(sub), capture_output=True, text=True,
+    subprocess.run([sys.executable, str(tmp_path / ".cckit/hooks/log_token_usage.py")], input=json.dumps(sub), capture_output=True, text=True,
                    env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path)}, timeout=30)
     assert stop_state(tmp_path)["stops"] == 2                                          # a subagent finishing is not a turn
     tr.write_text(tr.read_text() + msg_line("m2", out=70) + "\n")
@@ -1582,7 +1619,7 @@ def test_each_turn_reports_current_model_effort_tools_and_duration(server, tmp_p
     s = [r for r in stop_events(server) if r["Model"] == "claude-sonnet-5-5"][0]
     assert (s["Turns"], s["Duration (s)"], s["Tool Calls"], s["Tools"], s["Current Model"], s["Effort"]) == (1, 95, 1, "Edit:1", "claude-sonnet-5-5", "low")
     assert s["Session Minutes"] == 6                                                                              # a running total: 395 s since the first line
-    whole = json.dumps(dump(server)) + (tmp_path / ".claude/token_usage.csv.state.json").read_text()
+    whole = json.dumps(dump(server)) + (tmp_path / ".cckit/token_usage.csv.state.json").read_text()
     assert "SECRET" not in whole                                                                                  # prompts and tool inputs never leave the machine
 
 
@@ -1629,3 +1666,19 @@ def test_the_window_in_force_is_reported_not_the_default(server, tmp_path):
     stop_hook(tmp_path, t2, {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "75"})
     s = stop_events(server)[0]
     assert (s["Window"], s["Compact At %"]) == (500000, 75)
+
+
+def test_the_old_default_log_location_moves_but_a_chosen_one_stays(tmp_path):
+    (tmp_path / ".cckit/cckit.toml").write_text('[usage]\ncsv_path = ".claude/token_usage.csv"\n')
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude/token_usage.csv").write_text("timestamp\n1\n")
+    (tmp_path / ".claude/token_usage.csv.state.json").write_text("{}")
+    r = apply.init(tmp_path)
+    assert read(tmp_path / ".cckit/token_usage.csv") == "timestamp\n1\n" and (tmp_path / ".cckit/token_usage.csv.state.json").exists()
+    assert not (tmp_path / ".claude/token_usage.csv").exists() and 'csv_path = ".cckit/token_usage.csv"' in read(tmp_path / ".cckit/cckit.toml")
+    assert any("token_usage.csv ->" in ln for ln in r.lines)
+    other = tmp_path / "other"
+    (other / ".cckit").mkdir(parents=True)
+    (other / ".cckit/cckit.toml").write_text('[usage]\ncsv_path = "logs/tokens.csv"\n')
+    apply.init(other)
+    assert 'csv_path = "logs/tokens.csv"' in read(other / ".cckit/cckit.toml")

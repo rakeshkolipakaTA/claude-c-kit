@@ -5,7 +5,7 @@ Claude Code runs this before each prompt and sends JSON on stdin. The hook finds
 (a hook is not told the model; before the first response it falls back to $ANTHROPIC_MODEL or the "model" in the project settings). If it is an
 Opus model, it prints a short instruction that is added to the prompt as context; otherwise it prints nothing and costs nothing. It never blocks.
 Note: right after `/model` is changed the transcript still shows the previous model until the next response; the CLAUDE.md line covers that gap.
-Switch off: cckit.toml [model] opus_reminder = false, or CCKIT_OPUS_REMINDER=off on one machine.
+Switch off: .cckit/cckit.toml [model] opus_reminder = false, or CCKIT_OPUS_REMINDER=off on one machine.
 """
 import json
 import os

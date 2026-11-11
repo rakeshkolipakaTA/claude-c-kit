@@ -1,4 +1,4 @@
-"""cckit.toml: the single source of truth for what gets generated. Defaults live in DEFAULT_TOML."""
+"""`.cckit/cckit.toml`: the single source of truth for what gets generated. Defaults live in DEFAULT_TOML."""
 from __future__ import annotations
 
 import copy
@@ -7,10 +7,13 @@ import tomllib
 from pathlib import Path
 from urllib.parse import urlparse
 
-CONFIG_NAME = "cckit.toml"
+CONFIG_NAME = ".cckit/cckit.toml"
+LEGACY_CONFIG_NAME = "cckit.toml"          # where versions before 0.2.2 kept it: still read, and `cckit init` moves it
+DEFAULT_CSV = ".cckit/token_usage.csv"
+KEY_NAME = ".cckit/key.json"               # {"key": "..."}: the team join code, kept out of the config so it can be handled (ignored, shared) on its own
 
 DEFAULT_TOML = '''\
-# cckit.toml - source of truth for this repo's Claude Code cost settings.
+# .cckit/cckit.toml - source of truth for this repo's Claude Code cost settings.
 # Edit this file, then run:   cckit init      (safe to re-run; it only touches what it owns)
 # Check everything with:      cckit doctor
 
@@ -75,7 +78,7 @@ otel_endpoint = ""            # set to your collector (for example http://collec
 
 [usage]
 log = true                    # a Stop hook appends the token counts of every response to csv_path (numbers only; local; git-ignored)
-csv_path = ".claude/token_usage.csv"
+csv_path = ".cckit/token_usage.csv"
 scripts = true                # install usage_report.py and the /usage command: Claude or you can run them for session usage and estimated cost
 
 [telemetry]                   # report every context compaction to the team usage app (see `cckit register`). false = nothing is registered or sent
@@ -85,11 +88,11 @@ register_url = "https://claude-code-usage.hatchable.site/api/register"   # each 
 usage_url = "https://claude-code-usage.hatchable.site/api/usage"         # domain edit them, run `cckit init` and commit (machines then register again)
 ping_url = ""                 # optional health check for `cckit whoami --check` (default: .../api/ping next to register_url)
 allowed_domains = ["tigeranalytics.com"]   # registration needs an e-mail on one of these domains (checked here and again on the server)
-team_key = ""                 # join code for `cckit register` (ask your admin, or set CCKIT_TEAM_KEY). It is not shipped with cckit. If you put it here it is
-                              # committed with the repo: do that only for a PRIVATE repo, and only if you want teammates to be registered automatically
+                              # The team key (join code) is NOT set here: it lives in .cckit/key.json as {"key": "..."} (or $CCKIT_TEAM_KEY).
+                              # Commit that file only in a PRIVATE repo, to register teammates automatically; otherwise git-ignore it.
 auto_register = true          # a SessionStart hook takes the developer's company e-mail from `git config user.email` (plus their GitHub login,
                               # if it finds one) and registers them; if there is no company e-mail it asks Claude to ask the developer.
-                              # Needs team_key. false = developers run `cckit register`
+                              # Needs the key (.cckit/key.json). false = developers run `cckit register`
 events = ["auto"]             # which compactions to report: "auto", "manual"
 stop_report = true            # the Stop hook also reports each turn to the team app: tokens per model, current model and effort, tools used, how long it took.
                               # false = only the local CSV
@@ -130,13 +133,46 @@ def _merge(base: dict, over: dict) -> dict:
 
 
 def defaults() -> dict:
-    return tomllib.loads(DEFAULT_TOML)
+    d = tomllib.loads(DEFAULT_TOML)
+    d["telemetry"]["team_key"] = ""            # filled from .cckit/key.json by load()
+    return d
+
+
+def config_path(root: Path) -> Path:
+    """.cckit/cckit.toml, or the old ./cckit.toml when only that exists."""
+    root = Path(root)
+    new, old = root / CONFIG_NAME, root / LEGACY_CONFIG_NAME
+    return old if (not new.exists() and old.exists()) else new
+
+
+KEY_RX = re.compile(r"[A-Za-z0-9_\-]{4,128}")
+
+
+def read_key(root: Path) -> str:
+    """The team key from <root>/.cckit/key.json ({"key": "..."}); empty when there is none or it is malformed."""
+    try:
+        import json
+        k = json.loads((Path(root) / KEY_NAME).read_text(encoding="utf-8")).get("key")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return k if isinstance(k, str) and KEY_RX.fullmatch(k) else ""
+
+
+def save_key(root: Path, key: str) -> bool:
+    """Write .cckit/key.json. False (nothing written) when the key has characters cckit will not store."""
+    if not KEY_RX.fullmatch(key or ""):
+        return False
+    import json
+    p = Path(root) / KEY_NAME
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"key": key}, indent=2) + "\n", encoding="utf-8", newline="\n")
+    return True
 
 
 def load(root: Path) -> dict:
-    """Defaults overlaid with <root>/cckit.toml (when present)."""
+    """Defaults overlaid with <root>/.cckit/cckit.toml (when present; the old ./cckit.toml is read too), plus the key from .cckit/key.json."""
     cfg = defaults()
-    path = Path(root) / CONFIG_NAME
+    path = config_path(root)
     if path.exists():
         try:
             user = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -149,6 +185,9 @@ def load(root: Path) -> dict:
             for k in ("register_url", "usage_url", "ping_url"):
                 if k not in ut:
                     cfg["telemetry"][k] = ""
+    key = read_key(root)
+    if key:
+        cfg["telemetry"]["team_key"] = key
     return cfg
 
 
@@ -256,7 +295,7 @@ def validate(cfg: dict) -> list[str]:
             errs.append(f"[usage] {k} must be true or false")
     cp = us.get("csv_path")
     if not isinstance(cp, str) or not cp.strip() or cp.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", cp) or ".." in cp.replace("\\", "/").split("/"):
-        errs.append("[usage] csv_path must be a relative path inside the repository, for example .claude/token_usage.csv")
+        errs.append("[usage] csv_path must be a relative path inside the repository, for example .cckit/token_usage.csv")
     tel = cfg["telemetry"]
     for k in ("enabled", "send_project", "auto_register"):
         if not isinstance(tel.get(k), bool):

@@ -56,7 +56,7 @@ def test_valid_tool_search_forms():
 
 
 def test_user_toml_overrides_and_keeps_other_defaults(repo):
-    (repo / "cckit.toml").write_text('[model]\ndefault = "claude-sonnet-5-5"\n[agents.explorer]\nmax_turns = 5\n')
+    (repo / ".cckit/cckit.toml").write_text('[model]\ndefault = "claude-sonnet-5-5"\n[agents.explorer]\nmax_turns = 5\n')
     cfg = config.load(repo)
     assert cfg["model"]["default"] == "claude-sonnet-5-5"
     assert cfg["model"]["subagent"] == "haiku"
@@ -64,7 +64,7 @@ def test_user_toml_overrides_and_keeps_other_defaults(repo):
 
 
 def test_invalid_toml_is_a_clear_error(repo):
-    (repo / "cckit.toml").write_text("[model\n")
+    (repo / ".cckit/cckit.toml").write_text("[model\n")
     with pytest.raises(ValueError, match="not valid TOML"):
         config.load(repo)
 
@@ -119,10 +119,10 @@ def test_optional_switches():
 def test_init_creates_everything_and_is_idempotent(repo):
     r1 = apply.init(repo)
     assert r1.changed > 0
-    for rel in ("cckit.toml", "CLAUDE.md", ".claude/settings.json", ".claude/agents/explorer.md", ".claude/agents/test-runner.md",
-                ".claude/agents/reviewer.md", ".claude/rules/testing.md", ".claude/hooks/trim_output.py", ".claude/hooks/statusline.py",
+    for rel in (".cckit/cckit.toml", "CLAUDE.md", ".claude/settings.json", ".claude/agents/explorer.md", ".claude/agents/test-runner.md",
+                ".claude/agents/reviewer.md", ".claude/rules/testing.md", ".cckit/hooks/trim_output.py", ".cckit/hooks/statusline.py",
                 ".cckit/mcp-profiles/none.json", ".cckit/managed-settings.example.json", ".cckit/manifest.json",
-                ".claude/hooks/log_token_usage.py", ".claude/scripts/usage_report.py", ".claude/commands/usage.md", ".gitignore"):
+                ".cckit/hooks/log_token_usage.py", ".cckit/scripts/usage_report.py", ".claude/commands/usage.md", ".gitignore"):
         assert (repo / rel).exists(), rel
     before = {p: read(p) for p in repo.rglob("*") if p.is_file()}
     r2 = apply.init(repo)
@@ -145,7 +145,7 @@ def test_init_keeps_users_own_settings_and_reports_conflicts(repo):
     s = settings(repo)
     assert s["model"] == "opus" and s["env"]["BASH_MAX_OUTPUT_LENGTH"] == "99999" and s["env"]["FOO"] == "bar"
     assert s["permissions"]["allow"][0] == "Bash(npm run lint)" and "Read(./.env)" in s["permissions"]["deny"]
-    assert s["permissions"]["allow"][1:] == ["Bash(python3 .claude/scripts/usage_report.py:*)"]            # cckit's own rule is added after the user's
+    assert s["permissions"]["allow"][1:] == ["Bash(python3 .cckit/scripts/usage_report.py:*)"]            # cckit's own rule is added after the user's
     assert s["enabledPlugins"] == {"x": True}
     assert any("kept your 'model'" in n for n in res.lines)
     apply.init(repo, force=True)
@@ -156,8 +156,8 @@ def test_init_keeps_users_own_settings_and_reports_conflicts(repo):
 def test_changing_config_removes_stale_entries_it_added(repo):
     apply.init(repo)
     assert "CLAUDE_CODE_DISABLE_1M_CONTEXT" in settings(repo)["env"]
-    cfg = read(repo / "cckit.toml").replace("cap_context_to_200k = true", "cap_context_to_200k = false")
-    (repo / "cckit.toml").write_text(cfg)
+    cfg = read(repo / ".cckit/cckit.toml").replace("cap_context_to_200k = true", "cap_context_to_200k = false")
+    (repo / ".cckit/cckit.toml").write_text(cfg)
     apply.init(repo)
     s = settings(repo)
     assert "CLAUDE_CODE_DISABLE_1M_CONTEXT" not in s["env"]
@@ -187,7 +187,7 @@ def test_edited_generated_files_are_not_overwritten_without_force(repo):
 
 def test_untouched_files_follow_config_changes(repo):
     apply.init(repo)
-    (repo / "cckit.toml").write_text(read(repo / "cckit.toml").replace("max_turns = 15", "max_turns = 6"))
+    (repo / ".cckit/cckit.toml").write_text(read(repo / ".cckit/cckit.toml").replace("max_turns = 15", "max_turns = 6"))
     apply.init(repo)
     assert "maxTurns: 6" in read(repo / ".claude" / "agents" / "explorer.md")
 
@@ -195,7 +195,7 @@ def test_untouched_files_follow_config_changes(repo):
 def test_disabling_an_agent_removes_its_untouched_file(repo):
     apply.init(repo)
     assert (repo / ".claude/agents/reviewer.md").exists()
-    (repo / "cckit.toml").write_text(read(repo / "cckit.toml").replace("[agents.reviewer]", "[agents.reviewer]\nenabled = false"))
+    (repo / ".cckit/cckit.toml").write_text(read(repo / ".cckit/cckit.toml").replace("[agents.reviewer]", "[agents.reviewer]\nenabled = false"))
     res = apply.init(repo)
     assert not (repo / ".claude/agents/reviewer.md").exists() and any(l.startswith("removed") for l in res.lines)
     assert not doctor.run(repo, check_claude=False).failed
@@ -205,7 +205,7 @@ def test_disabled_agent_that_you_edited_is_kept(repo):
     apply.init(repo)
     f = repo / ".claude/agents/reviewer.md"
     f.write_text(read(f) + "\nmine\n")
-    (repo / "cckit.toml").write_text(read(repo / "cckit.toml").replace("[agents.reviewer]", "[agents.reviewer]\nenabled = false"))
+    (repo / ".cckit/cckit.toml").write_text(read(repo / ".cckit/cckit.toml").replace("[agents.reviewer]", "[agents.reviewer]\nenabled = false"))
     apply.init(repo)
     assert f.exists() and "mine" in read(f)
 
@@ -219,7 +219,7 @@ def test_broken_settings_json_is_never_overwritten(repo):
 
 
 def test_invalid_cckit_toml_aborts_before_writing(repo):
-    (repo / "cckit.toml").write_text("[model]\neffort = 'max'\n")
+    (repo / ".cckit/cckit.toml").write_text("[model]\neffort = 'max'\n")
     with pytest.raises(ValueError, match="effort"):
         apply.init(repo)
     assert not (repo / ".claude").exists()
@@ -258,7 +258,7 @@ def run_script(path: Path, payload) -> str:
 @pytest.mark.parametrize("cmd", ["pytest", "pytest -q tests/test_a.py", "python -m pytest -x", "npm test", "go test ./...", "cargo test --all", "mvn test"])
 def test_hook_rewrites_plain_test_runs(repo, cmd):
     apply.init(repo)
-    out = json.loads(run_script(repo / ".claude/hooks/trim_output.py", {"tool_name": "Bash", "tool_input": {"command": cmd, "description": "d"}}))
+    out = json.loads(run_script(repo / ".cckit/hooks/trim_output.py", {"tool_name": "Bash", "tool_input": {"command": cmd, "description": "d"}}))
     upd = out["hookSpecificOutput"]["updatedInput"]
     assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
     assert upd["command"] == f"set -o pipefail; {cmd} 2>&1 | tail -n 100" and upd["description"] == "d"
@@ -267,33 +267,33 @@ def test_hook_rewrites_plain_test_runs(repo, cmd):
 @pytest.mark.parametrize("cmd", ["pytest | grep x", "ls; pytest", "pytest && rm -rf x", "pytest > out.txt", "echo $(pytest)", "pytest # c", "cat file", "git status", "pytest `whoami`"])
 def test_hook_leaves_everything_else_alone(repo, cmd):
     apply.init(repo)
-    assert run_script(repo / ".claude/hooks/trim_output.py", {"tool_name": "Bash", "tool_input": {"command": cmd}}).strip() == "{}"
+    assert run_script(repo / ".cckit/hooks/trim_output.py", {"tool_name": "Bash", "tool_input": {"command": cmd}}).strip() == "{}"
 
 
 def test_hook_ignores_other_tools_and_garbage(repo):
     apply.init(repo)
-    h = repo / ".claude/hooks/trim_output.py"
+    h = repo / ".cckit/hooks/trim_output.py"
     assert run_script(h, {"tool_name": "Read", "tool_input": {"file_path": "x"}}).strip() == "{}"
     assert run_script(h, "not json").strip() == "{}"
 
 
 def test_hook_keeps_the_exit_code(repo):
     apply.init(repo)
-    out = json.loads(run_script(repo / ".claude/hooks/trim_output.py", {"tool_name": "Bash", "tool_input": {"command": "pytest"}}))
+    out = json.loads(run_script(repo / ".cckit/hooks/trim_output.py", {"tool_name": "Bash", "tool_input": {"command": "pytest"}}))
     cmd = out["hookSpecificOutput"]["updatedInput"]["command"].replace("pytest", "false")
     assert subprocess.run(["bash", "-c", cmd]).returncode != 0
 
 
 def test_hook_tail_lines_follow_config(repo):
-    (repo / "cckit.toml").write_text("[hooks]\ntail_lines = 40\n")
+    (repo / ".cckit/cckit.toml").write_text("[hooks]\ntail_lines = 40\n")
     apply.init(repo)
-    out = json.loads(run_script(repo / ".claude/hooks/trim_output.py", {"tool_name": "Bash", "tool_input": {"command": "pytest"}}))
+    out = json.loads(run_script(repo / ".cckit/hooks/trim_output.py", {"tool_name": "Bash", "tool_input": {"command": "pytest"}}))
     assert out["hookSpecificOutput"]["updatedInput"]["command"].endswith("tail -n 40")
 
 
 def test_statusline(repo):
     apply.init(repo)
-    s = repo / ".claude/hooks/statusline.py"
+    s = repo / ".cckit/hooks/statusline.py"
     assert run_script(s, {"model": {"display_name": "Sonnet 5.5"}, "context_window": {"used_percentage": 20}, "cost": {"total_cost_usd": 0.5}}).strip() == "[Sonnet 5.5] ctx 20% $0.50"
     assert "/compact" in run_script(s, {"context_window": {"used_percentage": 75}})
     assert run_script(s, {}).strip() == "[Claude]"
@@ -335,7 +335,7 @@ def test_doctor_detects_removed_settings(repo):
 
 
 def test_doctor_warns_when_thinking_budget_would_be_ignored(repo):
-    (repo / "cckit.toml").write_text("[thinking]\nmax_tokens = 8000\n")
+    (repo / ".cckit/cckit.toml").write_text("[thinking]\nmax_tokens = 8000\n")
     apply.init(repo)
     out = doctor.run(repo, check_claude=False).render()
     assert "max_tokens is ignored" in out
@@ -423,7 +423,7 @@ def test_run_unknown_profile_lists_available(repo):
 
 
 def test_mcp_profiles_come_from_toml(repo):
-    (repo / "cckit.toml").write_text('[mcp.profiles.docs.servers.my-docs]\ntype = "http"\nurl = "https://example.com/mcp"\n')
+    (repo / ".cckit/cckit.toml").write_text('[mcp.profiles.docs.servers.my-docs]\ntype = "http"\nurl = "https://example.com/mcp"\n')
     apply.init(repo)
     data = json.loads(read(repo / ".cckit/mcp-profiles/docs.json"))
     assert data == {"mcpServers": {"my-docs": {"type": "http", "url": "https://example.com/mcp"}}}
@@ -439,7 +439,7 @@ def test_cli_end_to_end(repo, capsys):
 
 
 def test_cli_init_error_exit_code(repo, capsys):
-    (repo / "cckit.toml").write_text("[context]\nauto_compact_pct = 500\n")
+    (repo / ".cckit/cckit.toml").write_text("[context]\nauto_compact_pct = 500\n")
     assert cli.main(["init", str(repo)]) == 2
     assert "auto_compact_pct" in capsys.readouterr().err
 
@@ -465,7 +465,7 @@ def opus_run(repo, transcript=None, env=None, cwd=None):
     payload = {"hook_event_name": "UserPromptSubmit", "cwd": str(cwd or repo), "prompt": "do the thing"}
     if transcript:
         payload["transcript_path"] = str(transcript)
-    p = subprocess.run([sys.executable, str(repo / ".claude/hooks/opus_reminder.py")], input=json.dumps(payload), capture_output=True, text=True,
+    p = subprocess.run([sys.executable, str(repo / ".cckit/hooks/opus_reminder.py")], input=json.dumps(payload), capture_output=True, text=True,
                        env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo), **(env or {})}, timeout=30)
     assert p.returncode == 0 and p.stderr == ""
     return p.stdout
@@ -478,8 +478,8 @@ def model_line(model, side=False):
 def test_reminder_hook_is_installed_by_default_and_listed_in_claude_md(repo):
     apply.init(repo)
     s = json.loads(read(repo / ".claude/settings.json"))
-    assert s["hooks"]["UserPromptSubmit"][0]["hooks"][0]["args"] == ["${CLAUDE_PROJECT_DIR}/.claude/hooks/opus_reminder.py"]
-    assert (repo / ".claude/hooks/opus_reminder.py").exists() and os.access(repo / ".claude/hooks/opus_reminder.py", os.X_OK)
+    assert s["hooks"]["UserPromptSubmit"][0]["hooks"][0]["args"] == ["${CLAUDE_PROJECT_DIR}/.cckit/hooks/opus_reminder.py"]
+    assert (repo / ".cckit/hooks/opus_reminder.py").exists() and os.access(repo / ".cckit/hooks/opus_reminder.py", os.X_OK)
     assert 'line starting "Model tip:"' in read(repo / "CLAUDE.md")
 
 
@@ -511,10 +511,10 @@ def test_reminder_can_be_switched_off(repo, tmp_path):
     t = tmp_path / "t.jsonl"
     t.write_text(model_line("claude-opus-5-5") + "\n")
     assert opus_run(repo, t, env={"CCKIT_OPUS_REMINDER": "off"}) == ""
-    (repo / "cckit.toml").write_text("[model]\nopus_reminder = false\n")
+    (repo / ".cckit/cckit.toml").write_text("[model]\nopus_reminder = false\n")
     apply.init(repo)
     s = json.loads(read(repo / ".claude/settings.json"))
-    assert "UserPromptSubmit" not in s.get("hooks", {}) and not (repo / ".claude/hooks/opus_reminder.py").exists()
+    assert "UserPromptSubmit" not in s.get("hooks", {}) and not (repo / ".cckit/hooks/opus_reminder.py").exists()
     assert "Model tip:" not in read(repo / "CLAUDE.md")
 
 
@@ -525,5 +525,5 @@ def test_reminder_survives_garbage_and_keeps_users_own_prompt_hooks(repo):
     apply.init(repo)
     entries = json.loads(read(repo / ".claude/settings.json"))["hooks"]["UserPromptSubmit"]
     assert len(entries) == 2 and any("echo mine" in json.dumps(e) for e in entries)
-    p = subprocess.run([sys.executable, str(repo / ".claude/hooks/opus_reminder.py")], input="not json", capture_output=True, text=True, timeout=30)
+    p = subprocess.run([sys.executable, str(repo / ".cckit/hooks/opus_reminder.py")], input="not json", capture_output=True, text=True, timeout=30)
     assert p.returncode == 0 and p.stdout == "" and p.stderr == ""

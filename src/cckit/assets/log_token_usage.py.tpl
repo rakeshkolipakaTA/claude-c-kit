@@ -35,7 +35,7 @@ ENDPOINT = __ENDPOINT__              # identifies the team's API in the identity
 USAGE_URL = __USAGE_URL__
 WINDOW = __WINDOW__
 SEND_PROJECT = __SEND_PROJECT__
-FLUSH_EVERY = __FLUSH_EVERY__                   # minimum seconds between events (cckit.toml [telemetry] stop_interval; 0 = one event per Stop)
+FLUSH_EVERY = __FLUSH_EVERY__                   # minimum seconds between events (.cckit/cckit.toml [telemetry] stop_interval; 0 = one event per Stop)
 OUTBOX_MAX = 200
 SEND_AT_MOST = 5                     # events sent per run
 
@@ -230,7 +230,7 @@ def env_int(name, lo, hi):
 
 def effective_window():
     """The context window auto-compaction works with on this machine: what Claude Code was started with (CLAUDE_CODE_AUTO_COMPACT_WINDOW, from
-    settings.json or the developer's own environment), else the value in cckit.toml. A developer who changed it is reported with their number."""
+    settings.json or the developer's own environment), else the value in .cckit/cckit.toml. A developer who changed it is reported with their number."""
     return env_int("CLAUDE_CODE_AUTO_COMPACT_WINDOW", 10_000, 10_000_000) or WINDOW
 
 

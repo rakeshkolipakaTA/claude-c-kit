@@ -1,8 +1,9 @@
-"""`cckit doctor`: check that the repo really has the settings cckit.toml asks for, and flag known pitfalls."""
+"""`cckit doctor`: check that the repo really has the settings .cckit/cckit.toml asks for, and flag known pitfalls."""
 from __future__ import annotations
 
 import json
 import re
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -82,7 +83,10 @@ def run(root: Path, check_claude: bool = True) -> Report:
         r.add("fail", e)
     if errs:
         return r
-    r.add("ok", f"{config.CONFIG_NAME} is valid" + ("" if (root / config.CONFIG_NAME).exists() else " (defaults; file not created yet, run `cckit init`)"))
+    cfg_file = config.config_path(root)
+    r.add("ok", f"{cfg_file.relative_to(root).as_posix()} is valid" + ("" if cfg_file.exists() else " (defaults; file not created yet, run `cckit init`)"))
+    if cfg_file.name == config.LEGACY_CONFIG_NAME and cfg_file.parent == Path(root):
+        r.add("warn", f"the config is in the old place ({config.LEGACY_CONFIG_NAME}); run `cckit init` to move it to {config.CONFIG_NAME}")
 
     # 2. settings.json against the config
     sp = root / apply.SETTINGS
@@ -102,10 +106,10 @@ def run(root: Path, check_claude: bool = True) -> Report:
                 if have is None:
                     missing.append(k)
                 elif have != v:
-                    wrong.append(f"{k}={have} (cckit.toml says {v})")
+                    wrong.append(f"{k}={have} (.cckit/cckit.toml says {v})")
             for k in ("model", "effortLevel"):
                 if s.get(k) != want[k]:
-                    wrong.append(f"{k}={s.get(k)!r} (cckit.toml says {want[k]!r})")
+                    wrong.append(f"{k}={s.get(k)!r} (.cckit/cckit.toml says {want[k]!r})")
             for rule in want["permissions"]["deny"]:
                 if rule not in ((s.get("permissions") or {}).get("deny") or []):
                     missing.append(f"deny {rule}")
@@ -120,9 +124,9 @@ def run(root: Path, check_claude: bool = True) -> Report:
             if missing:
                 r.add("fail", "settings.json is missing: " + ", ".join(missing) + ". Run `cckit init`.")
             if wrong:
-                r.add("warn", "settings.json differs from cckit.toml: " + "; ".join(wrong))
+                r.add("warn", "settings.json differs from .cckit/cckit.toml: " + "; ".join(wrong))
             if not missing and not wrong:
-                r.add("ok", "settings.json matches cckit.toml")
+                r.add("ok", "settings.json matches .cckit/cckit.toml")
             leaked = [k for k in (s.get("env") or {}) if k.startswith("OTEL_") or k == "CLAUDE_CODE_ENABLE_TELEMETRY"]
             if leaked:
                 r.add("warn", "OpenTelemetry variables in a repo settings file are ignored by Claude Code; put them in managed or user settings: " + ", ".join(leaked))
@@ -212,14 +216,16 @@ def run(root: Path, check_claude: bool = True) -> Report:
         r.add("warn", "[telemetry] is enabled but no URL is set, so nothing is reported. Set `endpoint`, or both `register_url` and `usage_url`, to the deployed usage app "
                       "(`cckit server export-app` writes one, with a README).")
     elif config.telemetry_active(cfg):
-        if tel["auto_register"] and not tel["team_key"]:
-            r.add("warn", "[telemetry] auto_register needs team_key: without it developers cannot be registered automatically")
+        if tel["auto_register"] and not tel["team_key"] and not os.environ.get("CCKIT_TEAM_KEY"):
+            r.add("warn", f"auto_register needs the team key: put it in {config.KEY_NAME} as " + '{"key": "..."}' + " (or set CCKIT_TEAM_KEY); without it developers register with `cckit register`")
+        elif tel["team_key"]:
+            r.add("info", f"the team key is in {config.KEY_NAME}: commit that file only in a private repository (add it to .gitignore otherwise)")
         who = identity.get_identity(config.identity_key(tel))
         if who:
             r.add("ok", f"compaction reports on; this machine is registered as {who['email']}")
         else:
             found = identity.detect_email(str(root), tel["allowed_domains"])
-            how = f"found {found[0]} from {found[1]}; the SessionStart hook will register it" if found and tel["auto_register"] and tel["team_key"] else "run `cckit register`"
+            how = f"found {found[0]} from {found[1]}; the SessionStart hook will register it" if found and tel["auto_register"] and (tel["team_key"] or os.environ.get("CCKIT_TEAM_KEY")) else "run `cckit register`"
             r.add("warn", f"compaction reports are on, but this machine is not registered yet ({how}).")
 
     # 6. things that quietly do nothing

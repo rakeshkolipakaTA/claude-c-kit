@@ -2,7 +2,7 @@
 
 This is monitoring that needs no server: every assistant message in a transcript carries the token counts the API
 returned. Only numbers and timestamps are read; no message text is shown or stored. Cost is an ESTIMATE and is only
-printed when you give prices in cckit.toml ([prices.<word in model name>]); the real bill is in your admin console.
+printed when you give prices in .cckit/cckit.toml ([prices.<word in model name>]); the real bill is in your admin console.
 """
 from __future__ import annotations
 

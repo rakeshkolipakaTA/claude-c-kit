@@ -25,13 +25,13 @@ def cmd_init(args) -> int:
         return 2
     print("\n".join(res.lines))
     print(("\nDry run: nothing was written." if args.dry_run else f"\n{res.changed} file(s) written.") +
-          "\nNext: run `cckit doctor`, review the diff, and commit cckit.toml, CLAUDE.md, .claude/ and .cckit/.")
+          "\nNext: run `cckit doctor`, review the diff, and commit .cckit/cckit.toml, CLAUDE.md, .claude/ and .cckit/.")
     if not args.dry_run:
         cfg = config.load(_root(args))
         t = cfg["telemetry"]
         interactive = sys.stdin.isatty() and sys.stdout.isatty()
         if not t["enabled"]:
-            print("\nUsage reporting to the team app is off ([telemetry] enabled = false in cckit.toml), so nobody is asked to register. Set it to true to turn it on.")
+            print("\nUsage reporting to the team app is off ([telemetry] enabled = false in .cckit/cckit.toml), so nobody is asked to register. Set it to true to turn it on.")
         elif not config.telemetry_active(cfg):
             print("\nUsage reporting is on but no URLs are set: give `endpoint`, or both `register_url` and `usage_url`, in [telemetry].")
         elif not identity.get_identity(config.identity_key(t)):
@@ -52,41 +52,24 @@ def cmd_init(args) -> int:
     return 0
 
 
-def _save_team_key(root: Path, key: str) -> bool:
-    """Write team_key into cckit.toml's [telemetry] section (replacing the value, or adding the line). False if the key looks unsafe to write."""
-    if not re.fullmatch(r"[A-Za-z0-9_\-]{4,128}", key):
-        return False
-    p = root / config.CONFIG_NAME
-    text = p.read_text(encoding="utf-8") if p.exists() else ""
-    if re.search(r'(?m)^team_key\s*=\s*"[^"]*"', text):
-        text = re.sub(r'(?m)^(team_key\s*=\s*)"[^"]*"', lambda m: f'{m.group(1)}"{key}"', text, count=1)
-    elif re.search(r"(?m)^\[telemetry\]", text):
-        text = re.sub(r"(?m)^(\[telemetry\][^\n]*\n)", lambda m: f'{m.group(1)}team_key = "{key}"\n', text, count=1)
-    else:
-        text += ("\n" if text and not text.endswith("\n") else "") + f'\n[telemetry]\nteam_key = "{key}"\n'
-    p.write_text(text, encoding="utf-8", newline="\n")
-    return True
-
-
 def _offer_to_save_team_key(root: Path, key: str, force: bool) -> None:
-    print("\nSave the team key in cckit.toml so teammates are registered automatically when they start Claude Code here?\n"
-          "It is committed with the repository, so say yes only if the repository is private.")
+    print(f"\nSave the team key in {config.KEY_NAME} so teammates are registered automatically when they start Claude Code here?\n"
+          "If you commit that file everyone who clones the repository gets the key, so say yes only if the repository is private.")
     if input("Save the team key? [y/N]: ").strip().lower() not in ("y", "yes"):
         print("Not saved. Teammates run `cckit register` (and enter the key) or set CCKIT_TEAM_KEY.")
         return
-    if not _save_team_key(root, key):
-        print("The key has characters cckit will not write into a file; edit cckit.toml by hand.")
+    if not config.save_key(root, key):
+        print(f"The key has characters cckit will not write into a file; create {config.KEY_NAME} by hand: " + '{"key": "..."}')
         return
-    apply.init(root, force=force)                       # regenerate the hooks: they now carry the key
-    print("Saved to cckit.toml; the hooks were regenerated. Commit cckit.toml and .claude/.")
+    print(f"Saved to {config.KEY_NAME} (Claude is not allowed to read it). Commit it only in a private repository; add it to .gitignore otherwise.")
 
 
 def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None, endpoint: str | None, team_key: str | None) -> int:
     t = cfg["telemetry"]
-    urls = {"endpoint": endpoint} if endpoint else t                 # --endpoint overrides every URL in cckit.toml
+    urls = {"endpoint": endpoint} if endpoint else t                 # --endpoint overrides every URL in .cckit/cckit.toml
     key, register_url = config.identity_key(urls), config.api_url(urls, "register")
     if not register_url or not config.valid_endpoint(register_url):
-        print("error: no valid register URL. Set [telemetry] endpoint (or register_url) in cckit.toml to an https:// URL, or pass --endpoint.", file=sys.stderr)
+        print("error: no valid register URL. Set [telemetry] endpoint (or register_url) in .cckit/cckit.toml to an https:// URL, or pass --endpoint.", file=sys.stderr)
         return 2
     domains = t["allowed_domains"]
     interactive = sys.stdin.isatty()
@@ -118,7 +101,7 @@ def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None,
     team_key = team_key or os.environ.get("CCKIT_TEAM_KEY") or t["team_key"]
     if not team_key:
         if not interactive:
-            print("error: no team key. Set [telemetry] team_key, CCKIT_TEAM_KEY, or pass --team-key.", file=sys.stderr)
+            print(f"error: no team key. Put it in {config.KEY_NAME} as " + '{"key": "..."}' + ", set CCKIT_TEAM_KEY, or pass --team-key.", file=sys.stderr)
             return 2
         team_key = input("Team key (from your admin): ").strip()
         cfg["_prompted_team_key"] = team_key
@@ -145,7 +128,7 @@ def cmd_login(args) -> int:
     t = cfg["telemetry"]
     key = config.identity_key(t)
     if not key:
-        print("error: no usage URL. Set [telemetry] endpoint (or register_url and usage_url) in cckit.toml.", file=sys.stderr)
+        print("error: no usage URL. Set [telemetry] endpoint (or register_url and usage_url) in .cckit/cckit.toml.", file=sys.stderr)
         return 2
     domains = t["allowed_domains"]
     interactive = sys.stdin.isatty()
@@ -343,13 +326,13 @@ def main(argv: list[str] | None = None) -> int:
     def common(p):
         p.add_argument("path", nargs="?", default=".", help="repo root (default: current directory)")
 
-    p = sub.add_parser("init", help="create or update cckit.toml, settings, CLAUDE.md, subagents, hooks")
+    p = sub.add_parser("init", help="create or update .cckit/cckit.toml, settings, CLAUDE.md, subagents, hooks")
     common(p)
     p.add_argument("--force", action="store_true", help="overwrite files and values you changed")
     p.add_argument("--dry-run", action="store_true", help="show what would change, write nothing")
     p.set_defaults(fn=cmd_init)
 
-    p = sub.add_parser("doctor", help="check the repo against cckit.toml")
+    p = sub.add_parser("doctor", help="check the repo against .cckit/cckit.toml")
     common(p)
     p.add_argument("--no-claude", action="store_true", help="do not call `claude --version`")
     p.set_defaults(fn=cmd_doctor)
@@ -379,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--email", help="your company e-mail (default: `git config user.email` when it is on an allowed domain, else asked)")
     p.add_argument("--github", help="your GitHub login, optional (default: found from git or gh when possible)")
     p.add_argument("--endpoint", help="usage endpoint (default: [telemetry] endpoint)")
-    p.add_argument("--team-key", help="team join code (default: [telemetry] team_key or $CCKIT_TEAM_KEY)")
+    p.add_argument("--team-key", help=f"team key (default: $CCKIT_TEAM_KEY, else {config.KEY_NAME})")
     p.set_defaults(fn=cmd_register)
 
     p = sub.add_parser("server", help="the standalone usage API app: run | keys | users | deactivate | activate | reset | dump | export-app")

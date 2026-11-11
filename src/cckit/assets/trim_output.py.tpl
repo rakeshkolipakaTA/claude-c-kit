@@ -4,7 +4,7 @@
 Claude Code sends the hook a JSON document on stdin. For a Bash call that is a plain test run
 (pytest, npm test, go test ...) we rewrite the command so that only the tail of its output reaches
 the model. The exit status of the test run is preserved (set -o pipefail). Anything else is passed
-through untouched. Edit cckit.toml and re-run `cckit init` to change the number of lines.
+through untouched. Edit .cckit/cckit.toml and re-run `cckit init` to change the number of lines.
 """
 import json
 import re
