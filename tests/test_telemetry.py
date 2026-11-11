@@ -1180,8 +1180,9 @@ def test_init_asks_for_the_email_offering_the_git_one_then_for_the_team_key(serv
     repo = init_repo(tmp_path, server)
     code, out = run_in_pty(["init", str(repo)], ["", KEY, "n"])
     assert code == 0
-    assert f"Your company e-mail (@tigeranalytics.com) [{ADA}, from git config user.email]:" in out
-    assert "Team key (from your admin):" in out and f"Registered {ADA}" in out
+    assert f"Your company e-mail (@tigeranalytics.com): press Enter to use {ADA} (from git config user.email), or type another:" in out
+    assert "never your prompts, code or replies" in out and "CCKIT_TELEMETRY=off" in out                    # says what this is for before asking
+    assert "Team key (the join code your admin gave you; not a password):" in out and f"Registered {ADA}" in out
     assert "Save the team key?" in out and "Not saved" in out
     assert identity.get_identity(server + "/exec")["email"] == ADA
     assert KEY not in read(repo / ".cckit/cckit.toml") and not any(KEY in read(p) for p in (repo / ".claude").rglob("*.py"))      # not saved: not committed
@@ -1245,7 +1246,7 @@ def test_init_does_not_ask_again_on_a_machine_that_is_already_registered(server,
 def test_init_with_the_key_already_in_the_toml_only_asks_for_the_email(server, tmp_path):
     repo = init_repo(tmp_path, server, with_key=True)
     code, out = run_in_pty(["init", str(repo)], [""])
-    assert code == 0 and "Team key (from your admin)" not in out and "Save the team key?" not in out and f"Registered {ADA}" in out
+    assert code == 0 and "Team key (" not in out and "Save the team key?" not in out and f"Registered {ADA}" in out
 
 
 @pytest.mark.skipif(not GIT, reason="needs git")

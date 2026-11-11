@@ -53,6 +53,17 @@ def cmd_init(args) -> int:
     return 0
 
 
+INTRO = ("Claude Code usage (model, token counts and how long turns take: never your prompts, code or replies) is reported to the team app under "
+         "your company e-mail, so the team can see usage and cost. You can switch it off any time with CCKIT_TELEMETRY=off.")
+
+
+def _email_prompt(domains: list[str], found) -> str:
+    doms = " / ".join("@" + d for d in domains)
+    if found:
+        return f"Your company e-mail ({doms}): press Enter to use {found[0]} (from {found[1]}), or type another: "
+    return f"Your company e-mail ({doms}), for example firstname.lastname@{domains[0]}: "
+
+
 def _registered_for_this_repo(cfg: dict, root: Path) -> bool:
     """True when this machine can report from this repo: a record exists for the repo's git e-mail, or git names no company e-mail and some record exists."""
     t = cfg["telemetry"]
@@ -63,7 +74,7 @@ def _registered_for_this_repo(cfg: dict, root: Path) -> bool:
 def _offer_to_save_team_key(root: Path, key: str, force: bool) -> None:
     print(f"\nSave the team key in {config.KEY_NAME} so teammates are registered automatically when they start Claude Code here?\n"
           "If you commit that file everyone who clones the repository gets the key, so say yes only if the repository is private.")
-    if input("Save the team key? [y/N]: ").strip().lower() not in ("y", "yes"):
+    if input("Save the team key? [y = yes, Enter = no]: ").strip().lower() not in ("y", "yes"):
         print("Not saved. Teammates run `cckit register` (and enter the key) or set CCKIT_TEAM_KEY.")
         return
     if not config.save_key(root, key):
@@ -87,8 +98,9 @@ def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None,
             email = found[0]
             print(f"Using {email} (from {found[1]}).")
         elif interactive:
+            print(INTRO)
             for _ in range(3):
-                ans = input(f"Your company e-mail ({' / '.join('@' + d for d in domains)})" + (f" [{found[0]}, from {found[1]}]" if found else "") + ": ").strip()
+                ans = input(_email_prompt(domains, found)).strip()
                 email = ans or (found[0] if found else "")
                 problem = identity.email_problem(email, domains)
                 if not problem:
@@ -111,7 +123,7 @@ def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None,
         if not interactive:
             print(f"error: no team key. Put it in {config.KEY_NAME} as " + '{"key": "..."}' + ", set CCKIT_TEAM_KEY, or pass --team-key.", file=sys.stderr)
             return 2
-        team_key = input("Team key (from your admin): ").strip()
+        team_key = input("Team key (the join code your admin gave you; not a password): ").strip()
         cfg["_prompted_team_key"] = team_key
     try:
         res = identity.register(key, register_url, team_key, email, github, domains)
@@ -119,7 +131,7 @@ def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None,
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(f"Registered {res.get('email', email)}" + (f" (GitHub: {res['github']})" if res.get("github") else "") +
-          f". Token saved to {identity.identity_path()} (keep it private, never commit it).")
+          f". Token saved to {identity.identity_path()} (keep it private, never commit it). Check any time with `cckit whoami`.")
     return 0
 
 
@@ -147,8 +159,9 @@ def cmd_login(args) -> int:
             if not interactive:
                 email = found[0] if found else ""
             else:
+                print(INTRO)
                 for _ in range(3):
-                    ans = input(f"Your company e-mail ({' / '.join('@' + d for d in domains)})" + (f" [{found[0]}]" if found else "") + ": ").strip()
+                    ans = input(_email_prompt(domains, found)).strip()
                     email = ans or (found[0] if found else "")
                     problem = identity.email_problem(email, domains)
                     if not problem:
@@ -156,7 +169,7 @@ def cmd_login(args) -> int:
                     print(problem)
         token = (args.token or os.environ.get("CCKIT_TOKEN") or "").strip()
         if not token and interactive:
-            token = getpass.getpass("Token (typing is hidden): ").strip()
+            token = getpass.getpass("Token (the one you were given; typing is hidden): ").strip()
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled.", file=sys.stderr)
         return 130
