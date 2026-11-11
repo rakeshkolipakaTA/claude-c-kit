@@ -26,6 +26,15 @@ Edit `cckit.toml`, run `cckit init` again, and only what changed is rewritten.
 | `.cckit/mcp-profiles/*.json` | MCP server sets for `cckit run --profile NAME` |
 | `.cckit/managed-settings.example.json` | for an **admin**: OpenTelemetry, allowed models, effort cap |
 
+## If the repository already has a CLAUDE.md
+
+`cckit init` never replaces it. It adds (or later updates) one block between `<!-- cckit:begin ... -->` and `<!-- cckit:end -->`; every other line, yours or added later, is left exactly as it was.
+- Line endings are kept (a Windows CRLF file stays CRLF, so the diff shows only the new block).
+- If the repository keeps its file at `.claude/CLAUDE.md` (and has no root `CLAUDE.md`), that one gets the block; if both exist the root file does. A `CLAUDE.md` that is a symlink to `AGENTS.md` keeps the link (the block lands in `AGENTS.md`).
+- A lone or reversed marker (a begin without its end) makes `init` stop **before it writes anything**, with a message, because replacing "from the first marker to the last" could delete your text. The same goes for a `settings.json` that is not valid JSON.
+- The block is short (about 20 lines) and tells Claude: be specific, plan big changes, use the cheap subagents, never paste whole logs, run `usage_report.py` for token and cost numbers (never estimate them), and never read the usage CSV. `cckit doctor` fails if a `CLAUDE.md` or rules file is over 200 lines. It never shortens your text; move detail into `.claude/rules/` or a skill.
+- `cckit init --dry-run` shows what would change and writes nothing.
+
 ## Your list, and where each item went
 
 Every setting name below was checked against the official Claude Code docs. Items marked **changed** are where the docs differ from the blog posts.
@@ -50,7 +59,7 @@ Also set: `BASH_MAX_OUTPUT_LENGTH`, `MAX_MCP_OUTPUT_TOKENS`, and `Read(...)` den
 
 * **Live**: the status line shows context % and session cost.
 * **Local, no server**: `cckit report --days 7` reads the token counts in `~/.claude/projects/**/*.jsonl` (numbers only, never message text): tokens per day and model, cache hit rate, the heaviest sessions, and a flag on sessions whose context got very long. Add `[prices.sonnet]` to `cckit.toml` to get an *estimated* cost; the real bill is in your admin console.
-* **A local log of every response** (`[usage] log = true`, on by default): a `Stop` hook (and `SubagentStop`) appends one row per response to `.claude/token_usage.csv`: `timestamp, session_id, message_id, model, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, subagent`. Numbers only; the file stays on the machine and `cckit init` adds it to `.gitignore` (a marked block; your own lines are kept). It reads only the lines added since the last turn, never writes a message id twice (repeated events, parallel sessions, a lost state file), waits a moment for the transcript to be flushed, and also catches up on subagent transcripts. The hook is synchronous on purpose: a background hook is killed when a headless run (`claude -p`, the SDK) exits right after the last response. Opt out with `CCKIT_USAGE_LOG=off`, or `log = false` (the hook, the CSV rule and the `.gitignore` block are removed again).
+* **A local log of every response** (`[usage] log = true`, on by default): a `Stop` hook (and `SubagentStop`) appends one row per response to `.claude/token_usage.csv`: `timestamp, session_id, message_id, model, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, subagent`. Numbers only; the file stays on the machine and `cckit init` adds it to `.gitignore` (a marked block; your own lines are kept). It reads only the lines added since the last turn, never writes a message id twice (repeated events, a lost state file), waits a moment for the transcript to be flushed, also catches up on subagent transcripts, and takes a small lock file so that parallel sessions write one header and lose no offset. Claude is denied `Read` on the CSV (it grows without limit; the report script is the way in). The hook is synchronous on purpose: a background hook is killed when a headless run (`claude -p`, the SDK) exits right after the last response. Opt out with `CCKIT_USAGE_LOG=off`, or `log = false` (the hook, the CSV rule and the `.gitignore` block are removed again).
 * **Scripts Claude can run** (`[usage] scripts = true`, on by default): `.claude/scripts/usage_report.py` and the `/usage` command. `python3 .claude/scripts/usage_report.py` prints this session's models, requests (main and subagent), compactions, tool calls, tokens, cache hit, context used now and estimated cost (the session is found from `CLAUDE_CODE_SESSION_ID`); `--session all --days 7 [--by day|model|session]` gives the week, `--session <id prefix>` one session, `--json` machine-readable output, `--all-projects` every project. `CLAUDE.md` tells Claude to run it instead of guessing token counts, and `cckit init` adds the narrow permission `Bash(python3 .claude/scripts/usage_report.py:*)` (it only takes effect after the developer accepts the folder-trust prompt, like every project allow rule). Costs appear only when you give your own rates in `[prices.<word in model name>]`; no prices are built in.
 * **Team-wide**: put `.cckit/managed-settings.example.json` through managed settings (OpenTelemetry metrics `claude_code.token.usage` and `claude_code.cost.usage`). `OTEL_*` variables are ignored in a repo's settings file, which is why this is a separate file.
 
@@ -66,6 +75,8 @@ to a small app you deploy yourself (it must be reachable without a login, becaus
 | `GET /?api=ping`, `GET /healthz` | health |
 | `GET /?api=export&table=events\|users[&format=csv]` | read the data (admin token) |
 
+- **Defaults.** `[telemetry]` is on and points at the team's usage app (`register_url` / `usage_url`), but **no team key is shipped** with the package: the key is a join code from your admin. Until a machine is registered nothing is sent, and the start-up registration hook is only installed when a `team_key` is configured. `enabled = false` switches the whole feature off (and `cckit init` says so). A `endpoint` you set yourself wins over the shipped default URLs.
+- **`cckit init` in a terminal asks for the company e-mail** (the one in `git config user.email` is offered as the default; personal addresses are refused) and, if none is configured, the team key. It then offers to save the key in `cckit.toml` so teammates are registered automatically when they start Claude Code: say yes only for a **private** repository, because the key is committed with it. Without a terminal it never prompts; set `CCKIT_TEAM_KEY` or run `cckit register` later. A refused or skipped registration does not make `init` fail: the files are written.
 - **Where the URLs live: `cckit.toml`.** Either one base `endpoint` (the APIs are `<endpoint>?api=register` and `<endpoint>?api=usage`), or each API's own URL, with `endpoint` left empty:
   ```
   [telemetry]
@@ -104,7 +115,14 @@ cckit run [--profile NAME] [--effort E] [--model M] [-- claude args]
 
 ## Safe by design
 
-`cckit init` never overwrites your work: keys you set in `settings.json` win (it tells you), only the marked block of `CLAUDE.md` is managed, and a generated file you edited is kept unless `--force`. A broken `settings.json` is reported, not replaced.
+`cckit init` never overwrites your work: keys you set in `settings.json` win (it tells you), a generated file you edited is kept unless `--force`, and a broken `settings.json` is reported, not replaced.
+
+**If you already have a `CLAUDE.md`:** your text is never touched. cckit appends one block between `<!-- cckit:begin ... -->` and `<!-- cckit:end -->` and from then on rewrites only what is between those two lines. Anything you write before, after or between your own sections survives every re-run, and your file's line endings (Windows CRLF included) are kept, so a diff shows only the block. Details:
+- A repo that keeps its memory file at `.claude/CLAUDE.md` (and has no root one) gets the block there, not a second file. If both exist, the root file is used. A `CLAUDE.md` that is a symlink to `AGENTS.md` stays a symlink, and the block goes into the target.
+- If a file has a `cckit:begin` without its `cckit:end` (or the other way round, or reversed), `init` stops with a clear message and changes nothing, because guessing could delete your text.
+- The block is about 20 lines. `cckit doctor` fails when `CLAUDE.md` is longer than 200 lines (every line is paid for on every turn); `init` never trims your text. The block tells Claude to run `usage_report.py` instead of guessing token counts and never to read the CSV log.
+
+**Usage reporting and `cckit init`.** Reporting is on by default and points at the team's usage app (the two URLs in `[telemetry]`). The team key is **not** shipped in this package: `init` asks for your company e-mail (offering the one in `git config user.email`) and, if `cckit.toml` has no key, for the team key (or set `CCKIT_TEAM_KEY`). It then offers to save the key in `cckit.toml` so teammates register automatically; say yes only for a **private** repository, because the file is committed. With no terminal (CI, a script) nothing is asked: it registers silently only when a key and a company e-mail are already available, otherwise it prints what to run. A registration problem (wrong key, offline) never makes `init` fail; run `cckit register` later. To turn reporting off, set `enabled = false` in `[telemetry]`: `init` says so and asks nothing. If you set your own `endpoint`, it wins over the shipped `register_url`/`usage_url`.
 
 ## Tests
 

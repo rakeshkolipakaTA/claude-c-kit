@@ -76,14 +76,15 @@ log = true                    # a Stop hook appends the token counts of every re
 csv_path = ".claude/token_usage.csv"
 scripts = true                # install usage_report.py and the /usage command: Claude or you can run them for session usage and estimated cost
 
-[telemetry]                   # report every context compaction to the team usage app (`cckit server export-app` writes it; see `cckit register`)
-enabled = false
-endpoint = ""                 # base URL of the usage app. Then register is <endpoint>?api=register and usage is <endpoint>?api=usage.
-register_url = ""             # OR give each API its own full URL (an app whose routes are /api/register and /api/usage, say). These win over endpoint.
-usage_url = ""                #   With both set, endpoint can stay empty. Change a domain or an app by editing these lines and running `cckit init`.
-ping_url = ""                 # optional health check for `cckit whoami --check` (default: endpoint?api=ping, or .../ping next to register_url)
+[telemetry]                   # report every context compaction to the team usage app (see `cckit register`). false = nothing is registered or sent
+enabled = true
+endpoint = ""                 # OR one base URL: then register is <endpoint>?api=register and usage is <endpoint>?api=usage
+register_url = "https://claude-code-usage.hatchable.site/api/register"   # each API's own URL; these win over endpoint. To move to another app or
+usage_url = "https://claude-code-usage.hatchable.site/api/usage"         # domain edit them, run `cckit init` and commit (machines then register again)
+ping_url = ""                 # optional health check for `cckit whoami --check` (default: .../api/ping next to register_url)
 allowed_domains = ["tigeranalytics.com"]   # registration needs an e-mail on one of these domains (checked here and again on the server)
-team_key = ""                 # join code for `cckit register`. Anyone who can read this repo can read it: it only keeps strangers out
+team_key = ""                 # join code for `cckit register` (ask your admin, or set CCKIT_TEAM_KEY). It is not shipped with cckit. If you put it here it is
+                              # committed with the repo: do that only for a PRIVATE repo, and only if you want teammates to be registered automatically
 auto_register = true          # a SessionStart hook takes the developer's company e-mail from `git config user.email` (plus their GitHub login,
                               # if it finds one) and registers them; if there is no company e-mail it asks Claude to ask the developer.
                               # Needs team_key. false = developers run `cckit register`
@@ -137,7 +138,12 @@ def load(root: Path) -> dict:
         except tomllib.TOMLDecodeError as e:
             raise ValueError(f"{CONFIG_NAME} is not valid TOML: {e}") from e
         cfg = _merge(cfg, user)
-        # agents / profiles / prices are keyed tables: keep only what the user wrote for removed keys? no - merge is fine
+        ut = user.get("telemetry") if isinstance(user.get("telemetry"), dict) else {}
+        if ut.get("endpoint"):
+            # The user chose their own base URL: the shipped default register_url / usage_url / ping_url must not silently win over it.
+            for k in ("register_url", "usage_url", "ping_url"):
+                if k not in ut:
+                    cfg["telemetry"][k] = ""
     return cfg
 
 

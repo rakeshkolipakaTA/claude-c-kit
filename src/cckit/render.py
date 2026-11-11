@@ -50,6 +50,9 @@ def build_env(cfg: dict) -> dict[str, str]:
 
 def build_deny(cfg: dict) -> list[str]:
     rules = [f"Read({p})" for p in cfg["permissions"]["deny_reads"]]
+    if cfg["usage"]["log"]:
+        p = cfg["usage"]["csv_path"].replace("\\", "/")
+        rules += [f"Read({p})", f"Read({p}.state.json)"]               # the log is for the report script, not for the model
     if cfg["model"]["block_opus_subagents"]:
         rules.append("Agent(model:opus)")
     return rules
@@ -104,7 +107,7 @@ def build_settings(cfg: dict) -> dict:
         hooks["SubagentStop"] = [log_hook_entry(cfg)]
     if config.telemetry_active(cfg):
         hooks["PreCompact"] = [compact_hook_entry(cfg)]
-        if cfg["telemetry"]["auto_register"]:
+        if cfg["telemetry"]["auto_register"] and cfg["telemetry"]["team_key"]:
             hooks["SessionStart"] = [session_hook_entry(cfg)]
     if hooks:
         out["hooks"] = hooks
@@ -154,7 +157,7 @@ def build_gitignore_block(cfg: dict) -> str | None:
         return None
     p = cfg["usage"]["csv_path"].replace("\\", "/")
     p = p[2:] if p.startswith("./") else p
-    return f"{GITIGNORE_BEGIN}\n/{p}\n/{p}.state.json\n{GITIGNORE_END}\n"
+    return f"{GITIGNORE_BEGIN}\n/{p}\n/{p}.state.json\n/{p}.lock\n{GITIGNORE_END}\n"
 
 
 def upsert_gitignore(existing: str | None, block: str | None) -> str | None:
@@ -208,6 +211,9 @@ def build_claude_md_block(cfg: dict) -> str:
     if cfg["usage"]["scripts"]:
         body += f"""- For tokens, cost or context used so far, run `{cfg["hooks"]["python"]} {REPORT_SCRIPT}` (add `--session all --days 7` for the week). Do not estimate them yourself.
 """
+    if cfg["usage"]["log"]:
+        body += f"""- `{cfg["usage"]["csv_path"]}` is a local log of every response's token counts. It grows without limit: never read it whole, use the report script.
+"""
     body += """
 # Compact instructions
 When compacting, keep: the goal of the task, decisions made and why, files changed, failing tests with their error lines,
@@ -222,6 +228,10 @@ def upsert_block(existing: str | None, block: str) -> str:
         return block
     b = existing.find("<!-- cckit:begin")
     e = existing.find(MARK_END)
+    if (b == -1) != (e == -1) or (b != -1 and e < b):
+        # a lone marker: replacing "from the first marker to the last" could delete the user's own text, so cckit does not guess
+        raise ValueError("CLAUDE.md has a cckit marker without its partner (<!-- cckit:begin ... --> and <!-- cckit:end -->). "
+                         "Fix or remove it by hand, then run `cckit init` again; nothing was changed.")
     if b != -1 and e != -1 and e > b:
         after = existing[e + len(MARK_END):].lstrip("\n")
         return existing[:b] + block + ("\n" + after if after else "")

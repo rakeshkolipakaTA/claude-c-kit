@@ -42,6 +42,43 @@ def logged_ids(csv_file):
     return ids
 
 
+class Lock:
+    """A lock file next to the CSV: parallel sessions take turns, so the header is written once and no offset is lost. A lock left behind by a
+    crashed process is ignored after 10 seconds. If the lock cannot be had within 3 seconds this run does nothing: the rows stay in the transcript
+    and the next event logs them."""
+
+    def __init__(self, target):
+        self.path = str(target) + ".lock"
+        self.held = False
+
+    def __enter__(self):
+        deadline = time.time() + 3
+        while True:
+            try:
+                os.close(os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                self.held = True
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(self.path) > 10:
+                        os.unlink(self.path)
+                        continue
+                except OSError:
+                    continue
+                if time.time() > deadline:
+                    return self
+                time.sleep(0.02)
+            except OSError:
+                return self
+
+    def __exit__(self, *exc):
+        if self.held:
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
+
+
 def settle(path, pause=0.1, tries=8):
     """Claude Code can fire Stop a moment before the last response is flushed to the transcript: wait until its size stops changing."""
     prev = -1
@@ -109,36 +146,39 @@ def main():
         csv_file = Path(CSV_PATH) if os.path.isabs(CSV_PATH) else root / CSV_PATH
         CSV_FILE[0] = csv_file
         state_file = csv_file.with_name(csv_file.name + ".state.json")
-        state = load_json(state_file)
-        offsets = state.get("offsets") if isinstance(state.get("offsets"), dict) else {}
-        recent = state.get("recent") if isinstance(state.get("recent"), list) else []
-        # the transcript of this event, plus every subagent transcript of the session: a subagent's last lines are often flushed after its own
-        # SubagentStop, and no later event would come for it
-        paths = [(tpath, sub_event)]
-        if not sub_event:
-            paths += [(str(f), True) for f in sorted(Path(tpath[: -len(".jsonl")] if tpath.endswith(".jsonl") else tpath).glob("subagents/*.jsonl"))]
-        settle(tpath)
-        session = str(data.get("session_id") or "")
-        rows, seen = [], set(recent)
-        for path, force_sub in paths:
-            try:
-                got = new_rows(path, force_sub, offsets, seen, session)
-            except OSError:
-                continue
-            rows += got
-            seen |= {r[2] for r in got}
-        if rows:
-            csv_file.parent.mkdir(parents=True, exist_ok=True)
-            buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
-            if not csv_file.exists() or csv_file.stat().st_size == 0:
-                w.writerow(COLUMNS)
-            w.writerows(rows)
-            with open(csv_file, "a", encoding="utf-8", newline="") as f:
-                f.write(buf.getvalue())                     # one write call: parallel sessions do not interleave rows
-        tmp = state_file.with_name(state_file.name + ".%d.tmp" % os.getpid())
-        tmp.write_text(json.dumps({"offsets": offsets, "recent": (recent + [r[2] for r in rows])[-RECENT:]}), encoding="utf-8")
-        os.replace(tmp, state_file)
+        csv_file.parent.mkdir(parents=True, exist_ok=True)
+        settle(tpath)                                       # outside the lock: waiting must not block other sessions
+        with Lock(csv_file) as lock:
+            if not lock.held:
+                return
+            state = load_json(state_file)
+            offsets = state.get("offsets") if isinstance(state.get("offsets"), dict) else {}
+            recent = state.get("recent") if isinstance(state.get("recent"), list) else []
+            # the transcript of this event, plus every subagent transcript of the session: a subagent's last lines are often flushed after its own
+            # SubagentStop, and no later event would come for it
+            paths = [(tpath, sub_event)]
+            if not sub_event:
+                paths += [(str(f), True) for f in sorted(Path(tpath[: -len(".jsonl")] if tpath.endswith(".jsonl") else tpath).glob("subagents/*.jsonl"))]
+            session = str(data.get("session_id") or "")
+            rows, seen = [], set(recent)
+            for path, force_sub in paths:
+                try:
+                    got = new_rows(path, force_sub, offsets, seen, session)
+                except OSError:
+                    continue
+                rows += got
+                seen |= {r[2] for r in got}
+            if rows:
+                buf = io.StringIO()
+                w = csv.writer(buf, lineterminator="\n")
+                if not csv_file.exists() or csv_file.stat().st_size == 0:
+                    w.writerow(COLUMNS)
+                w.writerows(rows)
+                with open(csv_file, "a", encoding="utf-8", newline="") as f:
+                    f.write(buf.getvalue())
+            tmp = state_file.with_name(state_file.name + ".%d.tmp" % os.getpid())
+            tmp.write_text(json.dumps({"offsets": offsets, "recent": (recent + [r[2] for r in rows])[-RECENT:]}), encoding="utf-8")
+            os.replace(tmp, state_file)
     except Exception:
         pass
 

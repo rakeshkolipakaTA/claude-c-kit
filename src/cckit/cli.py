@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -26,17 +27,57 @@ def cmd_init(args) -> int:
           "\nNext: run `cckit doctor`, review the diff, and commit cckit.toml, CLAUDE.md, .claude/ and .cckit/.")
     if not args.dry_run:
         cfg = config.load(_root(args))
-        if config.telemetry_active(cfg) and not identity.get_identity(config.identity_key(cfg["telemetry"])):
-            print("\nCompaction reports are on for this repo and this machine is not registered yet.")
-            have_key = bool(cfg["telemetry"]["team_key"] or os.environ.get("CCKIT_TEAM_KEY"))
-            if sys.stdin.isatty() and sys.stdout.isatty() or (have_key and identity.detect_email(str(_root(args)), cfg["telemetry"]["allowed_domains"])):
+        t = cfg["telemetry"]
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        if not t["enabled"]:
+            print("\nUsage reporting to the team app is off ([telemetry] enabled = false in cckit.toml), so nobody is asked to register. Set it to true to turn it on.")
+        elif not config.telemetry_active(cfg):
+            print("\nUsage reporting is on but no URLs are set: give `endpoint`, or both `register_url` and `usage_url`, in [telemetry].")
+        elif not identity.get_identity(config.identity_key(t)):
+            print("\nUsage reporting is on for this repo, and this machine is not registered yet.")
+            have_key = bool(t["team_key"] or os.environ.get("CCKIT_TEAM_KEY"))
+            if interactive or (have_key and identity.detect_email(str(_root(args)), t["allowed_domains"])):
                 try:
-                    return _register_flow(cfg, _root(args), None, None, None, None)
+                    rc = _register_flow(cfg, _root(args), None, None, None, None)
+                    if rc != 0:
+                        print("Registration did not complete (see above). Run `cckit register` when you are ready.")
+                    elif interactive and cfg.get("_prompted_team_key"):
+                        _offer_to_save_team_key(_root(args), cfg["_prompted_team_key"], args.force)
                 except (KeyboardInterrupt, EOFError):
                     print("\nSkipped. Run `cckit register` when you are ready.")
             else:
-                print("Run `cckit register`, or just start Claude Code here: it registers you from the company e-mail in your git config.")
+                print("Run `cckit register` (it asks for your company e-mail and the team key), or set CCKIT_TEAM_KEY and start Claude Code here: "
+                      "it registers you from the company e-mail in your git config.")
     return 0
+
+
+def _save_team_key(root: Path, key: str) -> bool:
+    """Write team_key into cckit.toml's [telemetry] section (replacing the value, or adding the line). False if the key looks unsafe to write."""
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{4,128}", key):
+        return False
+    p = root / config.CONFIG_NAME
+    text = p.read_text(encoding="utf-8") if p.exists() else ""
+    if re.search(r'(?m)^team_key\s*=\s*"[^"]*"', text):
+        text = re.sub(r'(?m)^(team_key\s*=\s*)"[^"]*"', lambda m: f'{m.group(1)}"{key}"', text, count=1)
+    elif re.search(r"(?m)^\[telemetry\]", text):
+        text = re.sub(r"(?m)^(\[telemetry\][^\n]*\n)", lambda m: f'{m.group(1)}team_key = "{key}"\n', text, count=1)
+    else:
+        text += ("\n" if text and not text.endswith("\n") else "") + f'\n[telemetry]\nteam_key = "{key}"\n'
+    p.write_text(text, encoding="utf-8", newline="\n")
+    return True
+
+
+def _offer_to_save_team_key(root: Path, key: str, force: bool) -> None:
+    print("\nSave the team key in cckit.toml so teammates are registered automatically when they start Claude Code here?\n"
+          "It is committed with the repository, so say yes only if the repository is private.")
+    if input("Save the team key? [y/N]: ").strip().lower() not in ("y", "yes"):
+        print("Not saved. Teammates run `cckit register` (and enter the key) or set CCKIT_TEAM_KEY.")
+        return
+    if not _save_team_key(root, key):
+        print("The key has characters cckit will not write into a file; edit cckit.toml by hand.")
+        return
+    apply.init(root, force=force)                       # regenerate the hooks: they now carry the key
+    print("Saved to cckit.toml; the hooks were regenerated. Commit cckit.toml and .claude/.")
 
 
 def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None, endpoint: str | None, team_key: str | None) -> int:
@@ -79,6 +120,7 @@ def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None,
             print("error: no team key. Set [telemetry] team_key, CCKIT_TEAM_KEY, or pass --team-key.", file=sys.stderr)
             return 2
         team_key = input("Team key (from your admin): ").strip()
+        cfg["_prompted_team_key"] = team_key
     try:
         res = identity.register(key, register_url, team_key, email, github, domains)
     except identity.RegisterError as e:

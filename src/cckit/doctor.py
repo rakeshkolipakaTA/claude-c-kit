@@ -129,7 +129,7 @@ def run(root: Path, check_claude: bool = True) -> Report:
 
     # 3. instruction files stay short (every line is paid for on every turn)
     limit = cfg["context"]["claude_md_max_lines"]
-    cm = root / apply.CLAUDE_MD
+    cm = apply.claude_md_path(root)
     if not cm.exists():
         r.add("fail", "CLAUDE.md is missing. Run `cckit init`.")
     else:

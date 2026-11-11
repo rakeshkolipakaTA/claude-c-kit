@@ -69,15 +69,38 @@ def write_cfg(repo, endpoint="http://127.0.0.1:9/exec", extra=""):
 
 
 # ------------------------------------------------------------------ config and generated files
-def test_telemetry_off_by_default_writes_nothing(tmp_path):
+def test_defaults_point_at_the_live_app_but_ship_no_team_key(tmp_path):
+    cfg = config.defaults()["telemetry"]
+    assert cfg["enabled"] is True and cfg["endpoint"] == ""
+    assert cfg["register_url"] == "https://claude-code-usage.hatchable.site/api/register" and cfg["usage_url"] == "https://claude-code-usage.hatchable.site/api/usage"
+    assert cfg["team_key"] == ""                                                    # a join code is never shipped inside a public package
+    assert config.api_url(cfg, "ping") == "https://claude-code-usage.hatchable.site/api/ping"
+    apply.init(tmp_path)
+    s = json.loads(read(tmp_path / ".claude/settings.json"))
+    assert "PreCompact" in s["hooks"] and "SessionStart" not in s["hooks"]          # nothing to register with yet: the start-up hook is not installed
+    assert all("team" not in read(p).lower() or "team_key" not in read(p) or 'TEAM_KEY = ""' in read(p) for p in (tmp_path / ".claude/hooks").glob("*.py"))
+
+
+def test_telemetry_switched_off_writes_no_reporting_hooks(tmp_path):
+    (tmp_path / "cckit.toml").write_text("[telemetry]\nenabled = false\n")
     apply.init(tmp_path)
     s = json.loads(read(tmp_path / ".claude/settings.json"))
     assert "PreCompact" not in s["hooks"] and "SessionStart" not in s["hooks"]
     assert not (tmp_path / ".claude/hooks/compact_report.py").exists()
 
 
-def test_enabled_without_endpoint_warns_and_writes_no_hook(tmp_path):
-    (tmp_path / "cckit.toml").write_text("[telemetry]\nenabled = true\n")
+def test_a_users_own_endpoint_wins_over_the_shipped_default_urls(tmp_path):
+    (tmp_path / "cckit.toml").write_text('[telemetry]\nendpoint = "https://mine.example.com/"\n')
+    t = config.load(tmp_path)["telemetry"]
+    assert (t["register_url"], t["usage_url"], t["ping_url"]) == ("", "", "")
+    assert config.api_url(t, "register") == "https://mine.example.com/?api=register"
+    (tmp_path / "cckit.toml").write_text('[telemetry]\nendpoint = "https://mine.example.com/"\nusage_url = "https://other.example.com/u"\n')
+    t = config.load(tmp_path)["telemetry"]
+    assert t["usage_url"] == "https://other.example.com/u" and config.api_url(t, "register") == "https://mine.example.com/?api=register"
+
+
+def test_enabled_with_every_url_cleared_warns_and_writes_no_hook(tmp_path):
+    (tmp_path / "cckit.toml").write_text('[telemetry]\nenabled = true\nregister_url = ""\nusage_url = ""\n')
     apply.init(tmp_path)
     assert "PreCompact" not in json.loads(read(tmp_path / ".claude/settings.json"))["hooks"]
     rep = doctor.run(tmp_path, check_claude=False)
@@ -1023,7 +1046,7 @@ def test_both_urls_without_an_endpoint_switch_telemetry_on(tmp_path):
 
 
 def test_only_one_of_the_two_urls_is_not_enough(tmp_path):
-    (tmp_path / "cckit.toml").write_text('[telemetry]\nenabled = true\nregister_url = "https://app.example.com/api/register"\n')
+    (tmp_path / "cckit.toml").write_text('[telemetry]\nenabled = true\nregister_url = "https://app.example.com/api/register"\nusage_url = ""\n')
     apply.init(tmp_path)
     assert "PreCompact" not in json.loads(read(tmp_path / ".claude/settings.json"))["hooks"]
     assert any(lv == "warn" and "no URL is set" in t for lv, t in doctor.run(tmp_path, check_claude=False).items)
@@ -1065,3 +1088,257 @@ def test_server_routes_by_path_as_well_as_by_query(server):
     assert http_get(server + "/api/ping")[1]["ready"] is True
     assert identity.post_json(server + "/api/nothing", {"x": 1})["error"].startswith("unknown api")
     assert http_get(server + "/api/export?table=users", ADMIN)[1]["ok"] is True
+
+
+# ------------------------------------------------------------------ `cckit init` in a real terminal: it asks for the e-mail
+def run_in_pty(args, inputs, timeout=90):
+    """Run `cckit <args>` on a pseudo-terminal, answering its prompts with `inputs` in order. Returns (exit code, everything it printed)."""
+    import pty
+    import select
+    pid, fd = pty.fork()
+    if pid == 0:
+        try:
+            os.execve(sys.executable, [sys.executable, "-m", "cckit.cli", *args], dict(os.environ))
+        finally:
+            os._exit(127)
+    for line in inputs:
+        os.write(fd, (line + "\n").encode())
+    out, end = b"", time.time() + timeout
+    while time.time() < end:
+        ready, _, _ = select.select([fd], [], [], 1)
+        if ready:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break                                              # the child closed the terminal
+            if not chunk:
+                break
+            out += chunk
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status), out.decode("utf-8", "replace").replace("\r\n", "\n")
+
+
+def init_repo(tmp_path, server, email=ADA, toml_extra="", with_key=False):
+    git_repo(tmp_path, email=email)
+    (tmp_path / "cckit.toml").write_text(f'[telemetry]\nenabled = true\nendpoint = "{server}/exec"\n' + (f'team_key = "{KEY}"\n' if with_key else "") + toml_extra)
+    return tmp_path
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_init_asks_for_the_email_offering_the_git_one_then_for_the_team_key(server, tmp_path):
+    repo = init_repo(tmp_path, server)
+    code, out = run_in_pty(["init", str(repo)], ["", KEY, "n"])
+    assert code == 0
+    assert f"Your company e-mail (@tigeranalytics.com) [{ADA}, from git config user.email]:" in out
+    assert "Team key (from your admin):" in out and f"Registered {ADA}" in out
+    assert "Save the team key?" in out and "Not saved" in out
+    assert identity.get_identity(server + "/exec")["email"] == ADA
+    assert KEY not in read(repo / "cckit.toml") and not any(KEY in read(p) for p in (repo / ".claude").rglob("*.py"))      # not saved: not committed
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_init_can_save_the_team_key_so_teammates_register_automatically(server, tmp_path):
+    repo = init_repo(tmp_path, server)
+    code, out = run_in_pty(["init", str(repo)], ["", KEY, "y"])
+    assert code == 0 and "Saved to cckit.toml; the hooks were regenerated" in out
+    assert f'team_key = "{KEY}"' in read(repo / "cckit.toml")
+    assert KEY in read(repo / ".claude/hooks/compact_report.py")
+    assert "SessionStart" in json.loads(read(repo / ".claude/settings.json"))["hooks"]          # now there is a key to register others with
+    assert cli.main(["doctor", str(repo), "--no-claude"]) == 0
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_init_accepts_a_different_company_email_than_git_has(server, tmp_path):
+    repo = init_repo(tmp_path, server)
+    code, out = run_in_pty(["init", str(repo)], ["other.person@tigeranalytics.com", KEY, "n"])
+    assert code == 0 and "Registered other.person@tigeranalytics.com" in out
+    assert identity.get_identity(server + "/exec")["email"] == "other.person@tigeranalytics.com"
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_init_does_not_fail_when_the_team_key_is_wrong(server, tmp_path):
+    repo = init_repo(tmp_path, server)
+    code, out = run_in_pty(["init", str(repo)], ["", "wrong-key"])
+    assert code == 0                                                           # the files were written: init itself worked
+    assert "wrong team key" in out and "Registration did not complete" in out and "Save the team key?" not in out
+    assert identity.get_identity(server + "/exec") is None
+    assert (repo / ".claude/settings.json").exists()
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_init_with_no_company_email_in_git_asks_and_refuses_personal_addresses(server, tmp_path):
+    repo = init_repo(tmp_path, server, email="me@gmail.com")
+    code, out = run_in_pty(["init", str(repo)], ["a@gmail.com", "b@yahoo.com", "c@x.org"])
+    assert code == 0 and out.count("is not a @tigeranalytics.com address") == 3 and "Registration did not complete" in out
+    assert "from git config" not in out.split("Your company e-mail")[1].split(":")[0]            # no default offered: the personal address is never suggested
+    assert identity.get_identity(server + "/exec") is None
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_init_tells_you_when_reporting_is_switched_off_and_asks_nothing(server, tmp_path):
+    repo = init_repo(tmp_path, server, toml_extra="")
+    (repo / "cckit.toml").write_text(f'[telemetry]\nenabled = false\nendpoint = "{server}/exec"\n')
+    code, out = run_in_pty(["init", str(repo)], [])
+    assert code == 0 and "Usage reporting to the team app is off ([telemetry] enabled = false" in out
+    assert "Your company e-mail" not in out and identity.get_identity(server + "/exec") is None
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_init_does_not_ask_again_on_a_machine_that_is_already_registered(server, tmp_path):
+    repo = init_repo(tmp_path, server)
+    identity.save_identity(server + "/exec", ADA, "", "tok")
+    code, out = run_in_pty(["init", str(repo)], [])
+    assert code == 0 and "Your company e-mail" not in out and "not registered yet" not in out
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_init_with_the_key_already_in_the_toml_only_asks_for_the_email(server, tmp_path):
+    repo = init_repo(tmp_path, server, with_key=True)
+    code, out = run_in_pty(["init", str(repo)], [""])
+    assert code == 0 and "Team key (from your admin)" not in out and "Save the team key?" not in out and f"Registered {ADA}" in out
+
+
+@pytest.mark.skipif(not GIT, reason="needs git")
+def test_ctrl_d_at_the_prompt_skips_registration_and_init_still_succeeds(server, tmp_path):
+    repo = init_repo(tmp_path, server)
+    code, out = run_in_pty(["init", str(repo)], ["\x04"])                      # end of input at the first prompt
+    assert code == 0 and "Skipped" in out and (repo / ".claude/settings.json").exists()
+
+
+def test_save_team_key_replaces_the_value_and_keeps_comments_and_other_text(tmp_path):
+    (tmp_path / "cckit.toml").write_text('[model]\ndefault = "haiku"\n\n[telemetry]\nenabled = true\nteam_key = ""   # ask admin\nevents = ["auto"]\n')
+    assert cli._save_team_key(tmp_path, "abcd1234") is True
+    assert read(tmp_path / "cckit.toml") == '[model]\ndefault = "haiku"\n\n[telemetry]\nenabled = true\nteam_key = "abcd1234"   # ask admin\nevents = ["auto"]\n'
+
+
+def test_save_team_key_adds_the_line_or_the_section_when_missing(tmp_path):
+    (tmp_path / "cckit.toml").write_text('[telemetry]   # reporting\nenabled = true\n')
+    cli._save_team_key(tmp_path, "abcd1234")
+    assert config.load(tmp_path)["telemetry"]["team_key"] == "abcd1234" and "# reporting" in read(tmp_path / "cckit.toml")
+    (tmp_path / "cckit.toml").write_text('[model]\ndefault = "haiku"')
+    cli._save_team_key(tmp_path, "abcd1234")
+    assert config.load(tmp_path)["telemetry"]["team_key"] == "abcd1234" and config.load(tmp_path)["model"]["default"] == "haiku"
+    (tmp_path / "cckit.toml").unlink()
+    cli._save_team_key(tmp_path, "abcd1234")                                      # no file at all
+    assert config.load(tmp_path)["telemetry"]["team_key"] == "abcd1234"
+
+
+@pytest.mark.parametrize("bad", ['x"; evil = "1', "a b c d", "ab", "k\nteam_key = 'y'", "é" * 8])
+def test_save_team_key_refuses_text_that_could_break_the_file(tmp_path, bad):
+    (tmp_path / "cckit.toml").write_text('[telemetry]\nteam_key = ""\n')
+    assert cli._save_team_key(tmp_path, bad) is False
+    assert read(tmp_path / "cckit.toml") == '[telemetry]\nteam_key = ""\n'
+
+
+# ------------------------------------------------------------------ an existing CLAUDE.md
+USER_MD = "# Our project\n\nWe use tabs. Run `make test` before pushing.\n\n## Deployment\nSee the wiki.\n"
+
+
+def test_an_existing_claude_md_keeps_every_user_line_and_gets_one_managed_block(tmp_path):
+    (tmp_path / "CLAUDE.md").write_text(USER_MD)
+    r = apply.init(tmp_path)
+    md = read(tmp_path / "CLAUDE.md")
+    assert md.startswith(USER_MD) and md.count("cckit:begin") == 1 and md.count("cckit:end") == 1
+    assert any(l.startswith("merged") and "CLAUDE.md" in l and "your text is kept" in l for l in r.lines)
+    again = apply.init(tmp_path)
+    assert read(tmp_path / "CLAUDE.md") == md and any(l.startswith("unchanged") and "CLAUDE.md" in l for l in again.lines)
+
+
+def test_text_the_user_adds_around_the_block_survives_later_updates(tmp_path):
+    (tmp_path / "CLAUDE.md").write_text(USER_MD)
+    apply.init(tmp_path)
+    md = read(tmp_path / "CLAUDE.md").replace("## Deployment", "## Deployment (edited)") + "\n## Added later\nKeep PRs small.\n"
+    (tmp_path / "CLAUDE.md").write_text(md)
+    (tmp_path / "cckit.toml").write_text("[usage]\nscripts = false\nlog = false\n")            # changes what the block says
+    apply.init(tmp_path)
+    new = read(tmp_path / "CLAUDE.md")
+    assert "## Deployment (edited)" in new and "## Added later\nKeep PRs small.\n" in new and "usage_report.py" not in new
+    assert new.count("cckit:begin") == 1
+
+
+def test_a_windows_claude_md_keeps_its_line_endings(tmp_path):
+    (tmp_path / "CLAUDE.md").write_bytes(USER_MD.replace("\n", "\r\n").encode())
+    apply.init(tmp_path)
+    raw = (tmp_path / "CLAUDE.md").read_bytes()
+    assert raw.count(b"\r\n") == raw.count(b"\n")                                  # no bare LF anywhere: the diff shows only the new block
+    assert raw.startswith(USER_MD.replace("\n", "\r\n").encode())
+    apply.init(tmp_path)
+    assert (tmp_path / "CLAUDE.md").read_bytes() == raw
+
+
+@pytest.mark.parametrize("content", ["", "no trailing newline", "\n\n\n", "# Title\n\n\n"])
+def test_odd_existing_claude_md_files(tmp_path, content):
+    (tmp_path / "CLAUDE.md").write_text(content)
+    apply.init(tmp_path)
+    md = read(tmp_path / "CLAUDE.md")
+    assert md.startswith(content) and md.count("cckit:begin") == 1 and md.endswith("<!-- cckit:end -->\n")
+
+
+def test_claude_md_inside_dot_claude_is_used_when_there_is_no_root_one(tmp_path):
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude/CLAUDE.md").write_text(USER_MD)
+    apply.init(tmp_path)
+    assert not (tmp_path / "CLAUDE.md").exists()                                   # a second memory file would be loaded next to it
+    assert read(tmp_path / ".claude/CLAUDE.md").startswith(USER_MD) and "cckit:begin" in read(tmp_path / ".claude/CLAUDE.md")
+    assert not any(lv == "fail" for lv, _ in doctor.run(tmp_path, check_claude=False).items)
+
+
+def test_when_both_exist_the_root_claude_md_gets_the_block(tmp_path):
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude/CLAUDE.md").write_text("# inner\n")
+    (tmp_path / "CLAUDE.md").write_text(USER_MD)
+    apply.init(tmp_path)
+    assert "cckit:begin" in read(tmp_path / "CLAUDE.md") and read(tmp_path / ".claude/CLAUDE.md") == "# inner\n"
+
+
+@pytest.mark.parametrize("broken", ["# mine\n<!-- cckit:begin - managed -->\nstray\n", "# mine\nstray\n<!-- cckit:end -->\n",
+                                    "<!-- cckit:end -->\nuser text\n<!-- cckit:begin - managed -->\n"])
+def test_a_lone_or_reversed_marker_stops_init_and_changes_nothing(tmp_path, broken, capsys):
+    (tmp_path / "CLAUDE.md").write_text(broken)
+    before = sorted(p.name for p in tmp_path.iterdir())
+    with pytest.raises(ValueError, match="marker"):
+        apply.init(tmp_path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == before and read(tmp_path / "CLAUDE.md") == broken      # nothing at all was written, not even cckit.toml
+    assert cli.main(["init", str(tmp_path)]) == 2 and "marker" in capsys.readouterr().err
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_an_invalid_settings_json_stops_init_before_anything_is_written(tmp_path, capsys):
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude/settings.json").write_text("{ not json")
+    (tmp_path / "CLAUDE.md").write_text(USER_MD)
+    before = sorted(p.name for p in tmp_path.iterdir())
+    assert cli.main(["init", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert "not valid JSON" in err and "nothing was changed" in err
+    assert sorted(p.name for p in (tmp_path / ".claude").iterdir()) == ["settings.json"] and read(tmp_path / "CLAUDE.md") == USER_MD
+    assert not (tmp_path / "cckit.toml").exists() and sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_a_dry_run_writes_nothing_even_with_an_existing_claude_md(tmp_path):
+    (tmp_path / "CLAUDE.md").write_text(USER_MD)
+    before = sorted(p.name for p in tmp_path.iterdir())
+    r = apply.init(tmp_path, dry_run=True)
+    assert read(tmp_path / "CLAUDE.md") == USER_MD and sorted(p.name for p in tmp_path.iterdir()) == before
+    assert any(l.startswith("merged") and "CLAUDE.md" in l for l in r.lines)
+
+
+def test_a_claude_md_symlinked_to_agents_md_keeps_the_link(tmp_path):
+    (tmp_path / "AGENTS.md").write_text(USER_MD)
+    (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+    apply.init(tmp_path)
+    assert (tmp_path / "CLAUDE.md").is_symlink() and read(tmp_path / "AGENTS.md").startswith(USER_MD) and "cckit:begin" in read(tmp_path / "AGENTS.md")
+
+
+def test_a_long_existing_claude_md_is_kept_and_doctor_says_to_trim_it(tmp_path):
+    (tmp_path / "CLAUDE.md").write_text("".join(f"rule {i}\n" for i in range(230)))
+    apply.init(tmp_path)
+    assert read(tmp_path / "CLAUDE.md").startswith("rule 0\n") and "rule 229\n" in read(tmp_path / "CLAUDE.md")
+    assert any(lv == "fail" and "limit 200" in t for lv, t in doctor.run(tmp_path, check_claude=False).items)
+
+
+def test_the_managed_block_stays_short_and_tells_claude_about_the_scripts_and_the_log(tmp_path):
+    apply.init(tmp_path)
+    md = read(tmp_path / "CLAUDE.md")
+    assert len(md.splitlines()) < 30
+    assert "usage_report.py" in md and "Do not estimate them yourself" in md and ".claude/token_usage.csv" in md

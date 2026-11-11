@@ -435,3 +435,58 @@ def test_subagent_files_of_other_sessions_are_not_swept_in(repo, tmp_path):
     write(tmp_path / "other" / "subagents" / "agent-9.jsonl", [A("x1", model="claude-haiku-5-5")])
     hook(repo, mine)
     assert [x["message_id"] for x in rows(repo)] == ["m1"]
+
+
+# ------------------------------------------------------------------ parallel sessions: one header, no lost offsets
+def test_many_parallel_first_runs_write_the_header_exactly_once(repo, tmp_path):
+    apply.init(repo)
+    files = [write(tmp_path / f"p{i}.jsonl", [A(f"p{i}m{j}", sid=f"P{i}") for j in range(4)]) for i in range(14)]
+    procs = [subprocess.Popen([sys.executable, str(repo / ".claude/hooks/log_token_usage.py")], stdin=subprocess.PIPE, text=True,
+                              env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo)}) for _ in files]
+    for i, p in enumerate(procs):
+        p.stdin.write(json.dumps({"session_id": f"P{i}", "hook_event_name": "Stop", "cwd": str(repo), "transcript_path": str(files[i])}))
+        p.stdin.close()
+    assert [p.wait(timeout=60) for p in procs] == [0] * 14
+    text = read(repo / ".claude/token_usage.csv")
+    assert text.count("timestamp,session_id,message_id") == 1 and text.startswith("timestamp,")
+    ids = [x["message_id"] for x in rows(repo)]
+    assert len(ids) == 56 and len(set(ids)) == 56
+    assert not (repo / ".claude/token_usage.csv.lock").exists()                    # the lock is released
+
+
+def test_a_stale_lock_from_a_crashed_run_does_not_block_logging(repo, tmp_path):
+    apply.init(repo)
+    lock = repo / ".claude/token_usage.csv.lock"
+    lock.parent.mkdir(exist_ok=True)
+    lock.write_text("")
+    os.utime(lock, (time.time() - 60,) * 2)                                          # a minute old: its owner is long gone
+    tr = write(tmp_path / "t.jsonl", [A("m1")])
+    hook(repo, tr)
+    assert [x["message_id"] for x in rows(repo)] == ["m1"]
+
+
+def test_a_held_lock_makes_the_run_skip_and_the_next_event_catches_up(repo, tmp_path):
+    apply.init(repo)
+    lock = repo / ".claude/token_usage.csv.lock"
+    lock.write_text("")                                                              # fresh lock: another run is busy
+    tr = write(tmp_path / "t.jsonl", [A("m1")])
+    t0 = time.time()
+    hook(repo, tr)
+    assert time.time() - t0 < 6 and rows(repo) == []                                 # gave up after about 3 seconds, wrote nothing
+    lock.unlink()
+    hook(repo, tr)
+    assert [x["message_id"] for x in rows(repo)] == ["m1"]                           # nothing was lost: the offset never moved
+
+
+def test_gitignore_block_lists_csv_state_and_lock(repo):
+    apply.init(repo)
+    gi = read(repo / ".gitignore")
+    assert "/.claude/token_usage.csv\n/.claude/token_usage.csv.state.json\n/.claude/token_usage.csv.lock\n" in gi
+
+
+def test_claude_cannot_read_the_log_it_is_told_not_to_read(repo):
+    apply.init(repo)
+    deny = json.loads(read(repo / ".claude/settings.json"))["permissions"]["deny"]
+    assert "Read(.claude/token_usage.csv)" in deny and "Read(.claude/token_usage.csv.state.json)" in deny
+    md = read(repo / "CLAUDE.md")
+    assert "never read it whole, use the report script" in md and ".claude/token_usage.csv" in md

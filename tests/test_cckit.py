@@ -105,6 +105,7 @@ def test_optional_switches():
     cfg["monitoring"]["statusline"] = False
     cfg["usage"]["log"] = False
     cfg["usage"]["scripts"] = False
+    cfg["telemetry"]["enabled"] = False
     s = render.build_settings(cfg)
     assert "CLAUDE_CODE_DISABLE_1M_CONTEXT" not in s["env"]
     assert s["env"]["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"] == "1"

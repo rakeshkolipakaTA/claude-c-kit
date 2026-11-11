@@ -24,6 +24,13 @@ CLAUDE_MD = "CLAUDE.md"
 EXECUTABLE = {render.TRIM_SCRIPT, render.STATUS_SCRIPT, render.COMPACT_SCRIPT, render.LOG_SCRIPT, render.REPORT_SCRIPT}
 
 
+def claude_md_path(root: Path) -> Path:
+    """./CLAUDE.md, or ./.claude/CLAUDE.md when that is the one the repository already uses (both are valid project memory files)."""
+    root = Path(root)
+    alt = root / ".claude" / "CLAUDE.md"
+    return alt if not (root / CLAUDE_MD).exists() and alt.exists() else root / CLAUDE_MD
+
+
 def sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -168,14 +175,31 @@ def init(root: Path, force: bool = False, dry_run: bool = False) -> Result:
     root = Path(root)
     res = Result()
     cfg_path = root / config.CONFIG_NAME
+    cfg = config.load(root)                                  # defaults when cckit.toml does not exist yet
+    errors = config.validate(cfg)
+    if errors:
+        raise ValueError("cckit.toml has problems:\n  - " + "\n  - ".join(errors))
+
+    # Preflight: everything that can make init refuse is checked BEFORE the first file is written, so a refusal changes nothing at all.
+    cm = claude_md_path(root)
+    raw_md = cm.read_bytes().decode("utf-8") if cm.exists() else None
+    crlf = raw_md is not None and "\r\n" in raw_md
+    old_md = raw_md.replace("\r\n", "\n") if raw_md is not None else None
+    new_md = render.upsert_block(old_md, render.build_claude_md_block(cfg))            # ValueError on a lone cckit marker
+    sp = root / SETTINGS
+    existing: dict = {}
+    if sp.exists():
+        try:
+            existing = json.loads(sp.read_text(encoding="utf-8") or "{}")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{SETTINGS} is not valid JSON ({e}). Fix it first; cckit will not overwrite it, and nothing was changed.") from e
+        if not isinstance(existing, dict):
+            raise ValueError(f"{SETTINGS} must contain a JSON object; nothing was changed.")
+
     if not cfg_path.exists():
         res.add("created", config.CONFIG_NAME, "defaults; edit it and run init again")
         if not dry_run:
             _write(cfg_path, config.DEFAULT_TOML)
-    cfg = config.load(root)
-    errors = config.validate(cfg)
-    if errors:
-        raise ValueError("cckit.toml has problems:\n  - " + "\n  - ".join(errors))
 
     manifest = load_manifest(root)
     new_files: dict[str, str] = {}
@@ -213,18 +237,17 @@ def init(root: Path, force: bool = False, dry_run: bool = False) -> Result:
         elif p.exists():
             res.add("kept", rel, "no longer generated, but you edited it")
 
-    # CLAUDE.md managed block
-    cm = root / CLAUDE_MD
-    old = cm.read_text(encoding="utf-8") if cm.exists() else None
-    new = render.upsert_block(old, render.build_claude_md_block(cfg))
-    if old is None:
-        res.add("created", CLAUDE_MD)
-    elif old == new:
-        res.add("unchanged", CLAUDE_MD)
+    # CLAUDE.md managed block (the rest of the file is the user's and is never touched, line endings included)
+    rel_cm = str(cm.relative_to(root)).replace("\\", "/")
+    if old_md is None:
+        res.add("created", rel_cm)
+    elif old_md == new_md:
+        res.add("unchanged", rel_cm)
     else:
-        res.add("merged", CLAUDE_MD, "managed block only; your text is kept")
-    if old != new and not dry_run:
-        _write(cm, new)
+        res.add("merged", rel_cm, "managed block only; your text is kept")
+    if old_md != new_md and not dry_run:
+        cm.parent.mkdir(parents=True, exist_ok=True)
+        cm.write_bytes((new_md.replace("\n", "\r\n") if crlf else new_md).encode("utf-8"))
 
     # .gitignore: keep the local usage log out of git (only the marked block is ours)
     gi = root / ".gitignore"
@@ -240,16 +263,7 @@ def init(root: Path, force: bool = False, dry_run: bool = False) -> Result:
     elif old_gi is not None or new_gi is not None:
         res.add("unchanged", ".gitignore")
 
-    # settings.json
-    sp = root / SETTINGS
-    existing: dict = {}
-    if sp.exists():
-        try:
-            existing = json.loads(sp.read_text(encoding="utf-8") or "{}")
-        except json.JSONDecodeError as e:
-            raise ValueError(f"{SETTINGS} is not valid JSON ({e}). Fix it first; cckit will not overwrite it.") from e
-        if not isinstance(existing, dict):
-            raise ValueError(f"{SETTINGS} must contain a JSON object")
+    # settings.json (parsed in the preflight)
     merged, owned, notes = merge_settings(existing, render.build_settings(cfg), manifest.get("settings") or {}, force)
     text = json.dumps(merged, indent=2) + "\n"
     if not sp.exists():
