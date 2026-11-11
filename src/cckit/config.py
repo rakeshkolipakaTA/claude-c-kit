@@ -89,7 +89,9 @@ auto_register = true          # a SessionStart hook takes the developer's compan
                               # if it finds one) and registers them; if there is no company e-mail it asks Claude to ask the developer.
                               # Needs team_key. false = developers run `cckit register`
 events = ["auto"]             # which compactions to report: "auto", "manual"
-stop_report = true            # the Stop hook also reports token counts per model (the usage and cost numbers), at most once a minute. false = only the local CSV
+stop_report = true            # the Stop hook also reports each turn to the team app: tokens per model, current model and effort, tools used, how long it took.
+                              # false = only the local CSV
+stop_interval = 0             # seconds: at least this long between two reports (0 = one report per turn). Raise it if the app's hourly limit is reached
 send_project = true           # include the repo folder name (never paths, prompts, code or summaries)
 
 [managed]                     # only used for .cckit/managed-settings.example.json (an admin deploys that file)
@@ -270,6 +272,8 @@ def validate(cfg: dict) -> list[str]:
         errs.append('[telemetry] events must be a non-empty list of "auto" and/or "manual"')
     if not isinstance(tel.get("stop_report"), bool):
         errs.append("[telemetry] stop_report must be true or false")
+    if not _is_int(tel.get("stop_interval")) or not 0 <= tel["stop_interval"] <= 3600:
+        errs.append("[telemetry] stop_interval must be a whole number of seconds from 0 to 3600")
     for name, a in cfg.get("agents", {}).items():
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
             errs.append(f"[agents.{name}] the name must be lower-case letters, digits and hyphens")

@@ -142,6 +142,7 @@ def render_log_script(cfg: dict) -> str:
             .replace("__STOP_REPORT__", "True" if config.stop_report_active(cfg) else "False")
             .replace("__ENDPOINT__", json.dumps(config.identity_key(t)))
             .replace("__USAGE_URL__", json.dumps(config.api_url(t, "usage")))
+            .replace("__FLUSH_EVERY__", str(int(t["stop_interval"])))
             .replace("__WINDOW__", str(cfg["context"]["auto_compact_window"]))
             .replace("__SEND_PROJECT__", "True" if t["send_project"] else "False"))
 

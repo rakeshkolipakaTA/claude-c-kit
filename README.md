@@ -6,7 +6,7 @@ the repo gets the same cheap, safe defaults without setting anything up by hand.
 Install with plain `pip` (Python 3.11+, no dependencies, no pipx needed). Pin the tag so everyone gets the same version:
 
 ```bash
-python3 -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.0"
+python3 -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.1"
 cd your-repo
 cckit login                 # company e-mail + the token you were given (or `cckit init`, which asks for the e-mail and team key)
 cckit doctor                # checks the repo against cckit.toml
@@ -14,7 +14,7 @@ git add cckit.toml CLAUDE.md .claude .cckit && git commit
 ```
 
 - If pip says `externally-managed-environment` (recent Debian/Ubuntu/macOS Homebrew Python), use a virtual environment:
-  `python3 -m venv ~/.cckit-venv && ~/.cckit-venv/bin/python -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.0"`,
+  `python3 -m venv ~/.cckit-venv && ~/.cckit-venv/bin/python -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.1"`,
   or add `--user`. On Windows use `py -m pip ...`.
 - If `cckit` is "not found" after installing (pip's script folder is not on PATH), run it as `python3 -m cckit init` instead; it is the same program.
 - From a clone of this repo: `pip install -e .`.
@@ -84,7 +84,12 @@ to a small app you deploy yourself (it must be reachable without a login, becaus
 | `GET /?api=export&table=events\|users[&format=csv]` | read the data (admin token) |
 
 - **Defaults.** `[telemetry]` is on and points at the team's usage app (`register_url` / `usage_url`), but **no team key is shipped** with the package: the key is a join code from your admin. Until a machine is registered nothing is sent, and the start-up registration hook is only installed when a `team_key` is configured. `enabled = false` switches the whole feature off (and `cckit init` says so). A `endpoint` you set yourself wins over the shipped default URLs.
-- **Usage and cost reports from the Stop hook** (`[telemetry] stop_report = true`, the default): after each turn the same hook that writes the CSV adds the new numbers up **per model** and sends them to the team app as an event with `trigger = "stop"`, at most once a minute (so a long turn is one event per model, not one per response). An event carries the company e-mail and token, the model, input / output / cache-read / cache-write tokens since the previous event (main agent **and** subagents), request counts, the current context size, the repo folder name and the session id: no prompts, code or replies. Nothing is collected until the machine is registered. If the app is unreachable or refuses, the events wait in the state file (at most 200, retried with a growing pause) and are sent later with the same event id, so nothing is counted twice. Total cost = the sum of the `stop` events; the `auto` / `manual` events are snapshots taken at compaction and must not be added to them. Switch off with `stop_report = false` or `CCKIT_TELEMETRY=off`. The usage app has to know this trigger (the reference `usage_api.py` does: it stores it and does not count it as a compaction).
+- **Usage and cost reports from the Stop hook** (`[telemetry] stop_report = true`, the default): after each turn the hook that writes the CSV sends the team app one event per model used in that turn (`trigger = "stop"`), so usage and cost can be read per model. Each event has the company e-mail and token and:
+  - the model's tokens: input / output / cache read / cache write since the previous event (main agent **and** subagents) and its request count;
+  - the turn: `turns` (how many times the Stop hook fired, i.e. prompts answered), `Duration (s)` (seconds from the prompt you typed to the last line of the answer), tool names and counts (`Tool Calls`, `Tools`; names only, never inputs or outputs);
+  - the settings in force: the current model (`Current Model`, the one that answered last), effort, Claude Code version, entrypoint, git branch, the current context size, the repo folder name and the session id.
+
+  Turns, duration and tool counts are put on one event of the batch (the model that wrote the most), so summing a column never counts a turn twice; the settings are on every event. No prompts, code or replies are sent. Nothing is collected until the machine is registered. If the app is unreachable or refuses (for example its hourly limit), the events wait in the state file (at most 200, retried with a growing pause) and are sent later with the same event id, so nothing is counted twice. `stop_interval = N` (seconds, default 0 = one report per turn) holds reports back so at least N seconds pass between them; the waiting numbers go out with the next one. Total cost = the sum of the `stop` events; the `auto` / `manual` events are snapshots taken at compaction and must not be added to them. Switch off with `stop_report = false` or `CCKIT_TELEMETRY=off`. The usage app has to know the `stop` trigger and the `turns`, `duration_s` and `current_model` fields (the reference `usage_api.py` does).
 - **`cckit login`** asks for your company e-mail and the token you were given (typing is hidden), saves them in `~/.config/cckit/identity.json` (owner-only, **outside any repo**, so there is nothing to git-ignore and it works for every repo on the machine), then runs `init` in the current folder. Non-interactive: `CCKIT_TOKEN=... cckit login --email NAME@tigeranalytics.com`. The token is not checked against the server at login; use `cckit whoami --check` for a reachability test.
 - **`cckit init` in a terminal asks for the company e-mail** (the one in `git config user.email` is offered as the default; personal addresses are refused) and, if none is configured, the team key. It then offers to save the key in `cckit.toml` so teammates are registered automatically when they start Claude Code: say yes only for a **private** repository, because the key is committed with it. Without a terminal it never prompts; set `CCKIT_TEAM_KEY` or run `cckit register` later. A refused or skipped registration does not make `init` fail: the files are written.
 - **Where the URLs live: `cckit.toml`.** Either one base `endpoint` (the APIs are `<endpoint>?api=register` and `<endpoint>?api=usage`), or each API's own URL, with `endpoint` left empty:

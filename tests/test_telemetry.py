@@ -1418,7 +1418,7 @@ def test_stop_hook_posts_per_model_totals_once(server, tmp_path):
     assert set(ev) == {"claude-sonnet-5-5", "claude-haiku-5-5"}                       # one event per model, so each is priced with its own rates
     s = ev["claude-sonnet-5-5"]
     assert (s["Input Tokens"], s["Output Tokens"], s["Cache Read"], s["Cache Write"], s["Requests"]) == (15, 100, 400, 20, 2)   # the final count of m1 (60), not both lines
-    assert (s["Context Tokens"], s["Session"], s["Project"], s["Client"], s["Email"]) == (305, "sess-1", tmp_path.name, "cckit-stop/1", ADA)
+    assert (s["Context Tokens"], s["Session"], s["Project"], s["Client"], s["Email"]) == (305, "sess-1", tmp_path.name, "cckit-stop/2", ADA)
     h = ev["claude-haiku-5-5"]
     assert (h["Input Tokens"], h["Output Tokens"], h["Requests"], h["Subagent Requests"], h["Subagent Output"]) == (1, 7, 0, 1, 7)
     assert rows(server, "Claude_Users")[0]["Compactions"] == 0                         # Stop events are not compactions
@@ -1430,7 +1430,7 @@ def test_stop_hook_posts_per_model_totals_once(server, tmp_path):
 
 
 def test_stop_reports_wait_a_minute_and_are_not_lost(server, tmp_path):
-    setup(server, tmp_path)
+    setup(server, tmp_path, extra="stop_interval = 60\n")
     cli.main(["register", str(tmp_path), "--email", ADA])
     tr = tmp_path / "t.jsonl"
     tr.write_text(msg_line("m1") + "\n")
@@ -1507,3 +1507,106 @@ def test_stop_report_validation():
     cfg = config.defaults()
     cfg["telemetry"]["stop_report"] = "yes"
     assert any("stop_report" in e for e in config.validate(cfg))
+
+
+def test_turns_count_the_stop_hook_firings_once_per_batch(server, tmp_path):
+    setup(server, tmp_path, extra="stop_interval = 60\n")
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    tr = tmp_path / "t.jsonl"
+    tr.write_text("\n".join([msg_line("m1", out=50), msg_line("h1", model="claude-haiku-5-5", out=7, side=True)]) + "\n")
+    stop_hook(tmp_path, tr)                                                            # turn 1: sent at once, on the model that wrote the most
+    ev = {r["Model"]: r for r in stop_events(server)}
+    assert (ev["claude-sonnet-5-5"]["Turns"], ev["claude-haiku-5-5"]["Turns"]) == (1, 0)
+    stop_hook(tmp_path, tr)                                                            # turn 2, 3: nothing new and inside the minute: counted, kept
+    stop_hook(tmp_path, tr)
+    assert stop_state(tmp_path)["stops"] == 2 and len(stop_events(server)) == 2
+    sub = {"session_id": "sess-1", "hook_event_name": "SubagentStop", "cwd": str(tmp_path), "agent_transcript_path": str(tr)}
+    subprocess.run([sys.executable, str(tmp_path / ".claude/hooks/log_token_usage.py")], input=json.dumps(sub), capture_output=True, text=True,
+                   env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path)}, timeout=30)
+    assert stop_state(tmp_path)["stops"] == 2                                          # a subagent finishing is not a turn
+    tr.write_text(tr.read_text() + msg_line("m2", out=70) + "\n")
+    age_state(tmp_path, last_flush=time.time() - 120)
+    stop_hook(tmp_path, tr)                                                            # turn 4: the batch says 3 turns (2, 3 and 4)
+    ev = stop_events(server)
+    assert sorted(r["Turns"] for r in ev if r["Turns"]) == [1, 3] and sum(r["Turns"] for r in ev) == 4      # 4 firings in all, none counted twice
+    assert stop_state(tmp_path)["stops"] == 0
+
+
+def test_an_older_database_gets_the_turns_column(tmp_path):
+    import sqlite3
+    db = tmp_path / "old.db"
+    c = sqlite3.connect(db)
+    c.executescript(usage_server.SCHEMA.replace(", turns INTEGER", ""))
+    c.commit()
+    c.close()
+    api = usage_server.UsageApi(str(db), KEY, [DOM], admin_token=ADMIN, github_check=fake_github)
+    assert "Turns" in api.export("events")["columns"]
+
+
+def turn_lines(prefix, t0, model="claude-sonnet-5-5", effort="high", tools=("Bash", "Read", "Bash"), sub_model=None):
+    """A typed prompt at t0, then tool calls and an answer, the last line 95 seconds later."""
+    def ts(sec):
+        return f"2026-07-01T10:{(sec // 60):02d}:{(sec % 60):02d}Z"
+    out = [json.dumps({"type": "user", "uuid": prefix + "u", "timestamp": ts(t0), "sessionId": "sess-1", "message": {"role": "user", "content": "SECRET PROMPT"}})]
+    for i, tool in enumerate(tools):
+        out.append(json.dumps({"type": "assistant", "uuid": f"{prefix}a{i}", "timestamp": ts(t0 + 10 * (i + 1)), "sessionId": "sess-1", "effort": effort,
+                               "version": "2.1.400", "entrypoint": "cli", "gitBranch": "feature/x",
+                               "message": {"id": f"{prefix}m{i}", "model": model, "usage": {"input_tokens": 1, "output_tokens": 10, "cache_read_input_tokens": 100,
+                                                                                          "cache_creation_input_tokens": 0},
+                                           "content": [{"type": "tool_use", "id": f"{prefix}t{i}", "name": tool, "input": {"command": "SECRET"}}]}}))
+        out.append(json.dumps({"type": "user", "uuid": f"{prefix}r{i}", "timestamp": ts(t0 + 10 * (i + 1) + 1), "sessionId": "sess-1",
+                               "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"{prefix}t{i}", "content": "SECRET"}]}}))
+    out.append(msg_line(prefix + "fin", model=model, out=20).replace("2026-07-01T10:00:00Z", ts(t0 + 95)))
+    if sub_model:
+        out.append(msg_line(prefix + "sub", model=sub_model, out=5, side=True).replace("2026-07-01T10:00:00Z", ts(t0 + 50)))
+    return out
+
+
+def test_each_turn_reports_current_model_effort_tools_and_duration(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    tr = tmp_path / "t.jsonl"
+    tr.write_text("\n".join(turn_lines("a", 0, model="claude-opus-5-5", effort="max", sub_model="claude-haiku-5-5")) + "\n")
+    stop_hook(tmp_path, tr)
+    ev = {r["Model"]: r for r in stop_events(server)}
+    assert set(ev) == {"claude-opus-5-5", "claude-haiku-5-5"}
+    o, h = ev["claude-opus-5-5"], ev["claude-haiku-5-5"]
+    assert (o["Turns"], o["Duration (s)"], o["Tool Calls"], o["Tools"]) == (1, 95, 3, "Bash:2;Read:1")
+    assert (h["Turns"], h["Duration (s)"], h["Tool Calls"], h["Tools"]) == (0, "", 0, "")                         # counted once per turn, on the main model's event
+    for r in (o, h):
+        assert (r["Current Model"], r["Effort"], r["Claude Version"], r["Entrypoint"], r["Branch"]) == ("claude-opus-5-5", "max", "2.1.400", "cli", "feature/x")
+    assert o["Output Tokens"] == 50 and h["Output Tokens"] == 5                                                   # model-level usage stays separate
+    tr.write_text(tr.read_text() + "\n".join(turn_lines("b", 300, model="claude-sonnet-5-5", effort="low", tools=("Edit",))) + "\n")
+    stop_hook(tmp_path, tr)                                                                                       # the second turn: only its own prompt, tools and time
+    s = [r for r in stop_events(server) if r["Model"] == "claude-sonnet-5-5"][0]
+    assert (s["Turns"], s["Duration (s)"], s["Tool Calls"], s["Tools"], s["Current Model"], s["Effort"]) == (1, 95, 1, "Edit:1", "claude-sonnet-5-5", "low")
+    whole = json.dumps(dump(server)) + (tmp_path / ".claude/token_usage.csv.state.json").read_text()
+    assert "SECRET" not in whole                                                                                  # prompts and tool inputs never leave the machine
+
+
+def test_branch_is_not_sent_without_send_project(server, tmp_path):
+    setup(server, tmp_path, extra="send_project = false\n")
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    tr = tmp_path / "t.jsonl"
+    tr.write_text("\n".join(turn_lines("a", 0)) + "\n")
+    stop_hook(tmp_path, tr)
+    r = stop_events(server)[0]
+    assert r["Branch"] == "" and r["Project"] == "" and r["Effort"] == "high"
+
+
+def test_stop_interval_validation():
+    cfg = config.defaults()
+    cfg["telemetry"]["stop_interval"] = -1
+    assert any("stop_interval" in e for e in config.validate(cfg))
+    cfg["telemetry"]["stop_interval"] = "5"
+    assert any("stop_interval" in e for e in config.validate(cfg))
+
+
+def test_unknown_duration_is_left_empty_not_zero(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(msg_line("m1") + "\n")                    # no typed prompt in the transcript: the start of the turn is unknown
+    stop_hook(tmp_path, tr)
+    r = stop_events(server)[0]
+    assert r["Turns"] == 1 and r["Duration (s)"] == ""

@@ -10,8 +10,8 @@ written twice, so repeated Stop events, parallel sessions and a lost state file 
 Columns: timestamp, session_id, message_id, model, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, subagent (yes/no)
 
 Reporting (only when [telemetry] stop_report is on and this machine is registered): the same numbers are added up per model and sent to the team's
-usage API as trigger "stop" events, at most once a minute. An event holds the company e-mail and token, the model, the token counts since the previous
-event (main + subagents), request counts, the current context size, the repo folder name and the session id: no prompts, code or replies. Events
+usage API as trigger "stop" events, at most once every `stop_interval` seconds (default: every Stop). An event holds the company e-mail and token, the model, the token counts since the previous
+event (main + subagents), request counts, how many times this hook fired (turns) and how many seconds the turn took from the prompt to the last line, the current model, effort, Claude Code version, entrypoint, branch and the tool names used, the current context size, the repo folder name and the session id: no prompts, code or replies. Events
 that could not be delivered wait in the state file (at most 200, retried with a growing pause) and are sent with a fixed event id, so a retry
 never counts twice. Opt out on one machine with CCKIT_TELEMETRY=off.
 """
@@ -22,6 +22,8 @@ import os
 import sys
 import platform
 import time
+from collections import Counter
+from datetime import datetime
 import urllib.request
 import uuid
 from pathlib import Path
@@ -33,7 +35,7 @@ ENDPOINT = __ENDPOINT__              # identifies the team's API in the identity
 USAGE_URL = __USAGE_URL__
 WINDOW = __WINDOW__
 SEND_PROJECT = __SEND_PROJECT__
-FLUSH_EVERY = 60                     # seconds between events
+FLUSH_EVERY = __FLUSH_EVERY__                   # minimum seconds between events (cckit.toml [telemetry] stop_interval; 0 = one event per Stop)
 OUTBOX_MAX = 200
 SEND_AT_MOST = 5                     # events sent per run
 
@@ -112,8 +114,25 @@ def settle(path, pause=0.1, tries=8):
         time.sleep(pause)
 
 
-def new_rows(path, force_sub, offsets, seen, session):
-    """Rows for the responses added to one transcript since the last run. Moves this transcript's offset past the complete lines it read."""
+def ts(v):
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def is_prompt(o, m):
+    """A line the developer typed (not a tool result, not a subagent, not a system line)."""
+    if o.get("type") != "user" or o.get("isSidechain") or o.get("isMeta") or o.get("isCompactSummary") or not isinstance(m, dict):
+        return False
+    c = m.get("content")
+    return bool(c.strip()) if isinstance(c, str) else isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "text" for b in c)
+
+
+def new_rows(path, force_sub, offsets, seen, session, meta=None):
+    """Rows for the responses added to one transcript since the last run. Moves this transcript's offset past the complete lines it read.
+    `meta` (the main transcript only) is filled with the facts of the newest turn: when the prompt was typed and when the last line was written,
+    the tool names used, and the model, effort, version, entrypoint and branch of the newest main response."""
     size = os.path.getsize(path)
     off = int(offsets.get(path) or 0)
     if off > size:
@@ -126,15 +145,25 @@ def new_rows(path, force_sub, offsets, seen, session):
         return []                                       # no complete line yet
     chunk = chunk[: end + 1]
     known = set(seen) | (logged_ids(CSV_FILE[0]) if off == 0 else set())
-    last = {}
+    last, tools = {}, {}
     for raw in chunk.splitlines():
-        if b'"usage"' not in raw:
+        usage = b'"usage"' in raw
+        if not usage and (meta is None or b'"user"' not in raw):
             continue
         try:
             o = json.loads(raw)
         except ValueError:
             continue
-        m = o.get("message") if isinstance(o, dict) else None
+        if not isinstance(o, dict):
+            continue
+        m = o.get("message")
+        if meta is not None:
+            t = None if o.get("isSidechain") else ts(o.get("timestamp"))
+            if t:
+                meta["end"] = t
+                if is_prompt(o, m):
+                    meta["start"] = t
+                    tools.clear()                       # tools of an earlier turn in this chunk do not belong to the newest turn
         if o.get("type") != "assistant" or not isinstance(m, dict) or not isinstance(m.get("usage"), dict):
             continue
         model = str(m.get("model") or "")
@@ -145,7 +174,17 @@ def new_rows(path, force_sub, offsets, seen, session):
         last[mid] = [str(o.get("timestamp") or ""), str(o.get("sessionId") or session), mid, model, int(u.get("input_tokens") or 0),
                      int(u.get("output_tokens") or 0), int(u.get("cache_creation_input_tokens") or 0), int(u.get("cache_read_input_tokens") or 0),
                      "yes" if (force_sub or o.get("isSidechain")) else "no"]    # a response is written once per content block: the last line is final
+        if meta is not None and not o.get("isSidechain"):
+            meta["current_model"] = model
+            for k, src in (("effort", "effort"), ("claude_version", "version"), ("entrypoint", "entrypoint"), ("branch", "gitBranch")):
+                if o.get(src):
+                    meta[k] = str(o[src])[:60]
+            for b in (m.get("content") if isinstance(m.get("content"), list) else []):
+                if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
+                    tools[b["id"]] = str(b.get("name") or "")[:40]
     offsets[path] = off + end + 1
+    if meta is not None:
+        meta["tools"] = dict(Counter(tools.values()))
     return [r for mid, r in last.items() if mid not in known]
 
 
@@ -182,17 +221,45 @@ def add_pending(state, rows):
     state["pending"] = pend
 
 
+def add_turn(state, meta):
+    """Facts about the turn(s) waiting for the next event: seconds from the prompt to the end of the answer, tools used, current model and settings."""
+    t = state.get("turn") if isinstance(state.get("turn"), dict) else {}
+    if meta.get("start") and meta.get("end"):
+        t["duration_s"] = int(t.get("duration_s") or 0) + max(0, int((meta["end"] - meta["start"]).total_seconds()))
+    tools = t.get("tools") if isinstance(t.get("tools"), dict) else {}
+    for k, v in (meta.get("tools") or {}).items():
+        tools[k] = int(tools.get(k) or 0) + v
+    t["tools"] = tools
+    for k in ("current_model", "effort", "claude_version", "entrypoint", "branch"):
+        if meta.get(k):
+            t[k] = meta[k]
+    state["turn"] = t
+
+
 def flush_pending(state, now, project):
-    """Turn the waiting totals into events (one per model, each with a fixed id) when a minute has passed since the last ones."""
+    """Turn the waiting totals into events (one per model, each with a fixed id) when a minute has passed since the last ones.
+    "turns" = how many times the Stop hook fired since the previous event; it is put on one event only (the model that wrote the most), so that
+    summing the events never counts a turn twice."""
     pend = state.get("pending")
     if not pend or now - float(state.get("last_flush") or 0) < FLUSH_EVERY:
         return
     box = state.get("outbox") if isinstance(state.get("outbox"), list) else []
+    main = max(pend, key=lambda k: pend[k]["o"])
+    t = state.get("turn") if isinstance(state.get("turn"), dict) else {}
+    tools = t.get("tools") if isinstance(t.get("tools"), dict) else {}
     for model, p in pend.items():
-        box.append({"event_id": uuid.uuid4().hex, "trigger": "stop", "model": model, "input_tokens": p["i"], "output_tokens": p["o"],
-                    "cache_read": p["cr"], "cache_write": p["cw"], "requests": p["req"], "sub_requests": p["sreq"], "sub_output": p["sout"],
+        first = model == main                                 # turns, duration and tool counts go on one event only, so that sums stay right
+        box.append({"event_id": uuid.uuid4().hex, "trigger": "stop", "model": model, "turns": int(state.get("stops") or 0) if first else 0,
+                    "duration_s": int(t["duration_s"]) if first and "duration_s" in t else None, "current_model": t.get("current_model") or main,
+                    "effort": t.get("effort", ""), "claude_version": t.get("claude_version", ""), "entrypoint": t.get("entrypoint", ""),
+                    "branch": t.get("branch", "") if SEND_PROJECT else "", "tool_calls": sum(tools.values()) if first else 0,
+                    "tools": ";".join("%s:%d" % kv for kv in sorted(tools.items(), key=lambda kv: -kv[1])[:8]) if first else "",
+                    "input_tokens": p["i"], "output_tokens": p["o"], "cache_read": p["cr"], "cache_write": p["cw"], "requests": p["req"], "sub_requests": p["sreq"], "sub_output": p["sout"],
                     "context_tokens": p["ctx"], "window": WINDOW, "project": project, "session": p["session"], "os": platform.system(),
-                    "client": "cckit-stop/1"})
+                    "client": "cckit-stop/2"})
+        box[-1] = {k: v for k, v in box[-1].items() if v is not None}       # an unknown duration is left out (stored as empty), never sent as 0
+    state["stops"] = 0
+    state["turn"] = {}
     state["outbox"] = box[-OUTBOX_MAX:]
     state["pending"] = {}
     state["last_flush"] = now
@@ -272,10 +339,10 @@ def main():
             if not sub_event:
                 paths += [(str(f), True) for f in sorted(Path(tpath[: -len(".jsonl")] if tpath.endswith(".jsonl") else tpath).glob("subagents/*.jsonl"))]
             session = str(data.get("session_id") or "")
-            rows, seen = [], set(recent)
+            rows, seen, meta = [], set(recent), {}
             for path, force_sub in paths:
                 try:
-                    got = new_rows(path, force_sub, offsets, seen, session)
+                    got = new_rows(path, force_sub, offsets, seen, session, None if force_sub else meta)
                 except OSError:
                     continue
                 rows += got
@@ -292,6 +359,9 @@ def main():
             state["offsets"], state["recent"] = offsets, (recent + [r[2] for r in rows])[-RECENT:]
             if ident:                                       # nothing is collected for sending until this machine is registered
                 add_pending(state, rows)
+                if not sub_event:
+                    state["stops"] = int(state.get("stops") or 0) + 1       # one turn of the main agent
+                    add_turn(state, meta)
                 flush_pending(state, time.time(), os.path.basename(str(root).rstrip("/\\")) if SEND_PROJECT else "")
             write_state(state_file, state)
         if ident:
