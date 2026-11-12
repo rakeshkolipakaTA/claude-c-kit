@@ -100,7 +100,7 @@ def log_hook_entry(cfg: dict) -> dict:
 
 
 def session_hook_entry(cfg: dict) -> dict:
-    """Runs when a session starts: registers the developer once (company e-mail from git) or asks Claude to ask. Synchronous, because
+    """Runs when a session starts: registers the developer once (company e-mail from git) or shows a one-line note. Synchronous, because
     it may hand a sentence to Claude; it exits at once when this machine is already registered."""
     return {"matcher": "startup|resume",
             "hooks": [{"type": "command", "command": cfg["hooks"]["python"], "args": ["${CLAUDE_PROJECT_DIR}/" + COMPACT_SCRIPT], "timeout": 30}]}

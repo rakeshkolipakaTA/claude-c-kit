@@ -108,7 +108,7 @@ allowed_domains = ["tigeranalytics.com"]   # registration needs an e-mail on one
                               # The team key (join code) is NOT set here: it lives in .cckit/key.json as {"key": "..."} (or $CCKIT_TEAM_KEY).
                               # Commit that file only in a PRIVATE repo, to register teammates automatically; otherwise git-ignore it.
 auto_register = true          # a SessionStart hook takes the developer's company e-mail from `git config user.email` (plus their GitHub login,
-                              # if it finds one) and registers them; if there is no company e-mail it asks Claude to ask the developer.
+                              # if it finds one) and registers them; if there is no company e-mail it shows a one-line note (nobody is asked).
                               # Needs the key (.cckit/key.json). false = developers run `cckit register`
 events = ["auto"]             # which compactions to report: "auto", "manual"
 stop_report = true            # the Stop hook also reports each turn to the team app: tokens per model, current model and effort, tools used, how long it took.

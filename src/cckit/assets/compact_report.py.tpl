@@ -3,7 +3,7 @@
 
 SessionStart  If this machine is not registered yet, take the developer's company e-mail from `git config user.email` (only an address
               on an allowed domain is used) plus, when it can be found, their GitHub login, and call the REGISTER api. If there is no
-              company e-mail, ask Claude to ask the developer (at most every 3 days).
+              company e-mail, show a one-line note (at most every 3 days) saying to set `git config user.email`; nobody is asked for an e-mail.
 PreCompact    Call the USAGE api with what happened: model, context size and the session's Claude metrics.
 
 Sent: company e-mail, GitHub login (optional), how the developer is billed ("subscription" or "metered", the plan such as team or bedrock) and, for a Claude login, its plan details (organisation name and type, seat tier, billing type, whether extra usage is on, rate-limit tier; never the login's e-mail, name, ids or tokens), trigger (auto/manual), the model, reasoning effort, Claude Code version and entrypoint,
@@ -374,7 +374,7 @@ def report(data, ident):
     post(USAGE_URL, payload, 10)
 
 
-# ------------------------------------------------------------------ SessionStart: register, or ask Claude to ask
+# ------------------------------------------------------------------ SessionStart: register, or say what to set in git
 def asked_recently():
     return time.time() - float(read_json(identity_path().with_name("asked.json")).get(ENDPOINT) or 0) < ASK_EVERY_SECONDS
 
@@ -387,7 +387,7 @@ def mark_asked():
 
 
 def auto_register(cwd):
-    """(registered?, message for the user, ask?). ask=True when only the developer can supply the e-mail."""
+    """(registered?, message for the user, tell?). tell=True when git names no usable company e-mail, so the developer should be told once in a while."""
     em = detect_email(cwd)
     if not em:
         return False, "", True
@@ -413,12 +413,8 @@ def session_start(data):
     if not ask or asked_recently():
         return
     mark_asked()
-    script = os.path.join(os.environ.get("CLAUDE_PROJECT_DIR") or cwd or ".", ".claude", "hooks", "compact_report.py")
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext":
-        "This repo reports Claude Code usage to the team (company e-mail, model and token counts only), but this machine is not registered and "
-        "no %s e-mail was found in git config. In your first reply, ask the user for their company e-mail address, then run: "
-        "python3 \"%s\" --register THEIR_EMAIL . If they decline, do nothing and do not ask again."
-        % (" / ".join("@" + d for d in DOMAINS), script)}}))
+    print(json.dumps({"systemMessage": "Claude cost kit: usage is not reported for you, because git has no %s e-mail. Run `git config user.email firstname.lastname@%s` "
+                                       "in this repo and restart Claude Code. (This note shows at most every 3 days.)" % (" / ".join("@" + d for d in DOMAINS), DOMAINS[0])}))
 
 
 def main():

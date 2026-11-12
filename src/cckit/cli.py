@@ -38,7 +38,9 @@ def cmd_init(args) -> int:
             rec, git_email = identity.pick_identity(config.identity_key(t), str(_root(args)), t["allowed_domains"])
             print("\nUsage reporting is on for this repo, and " + (f"this machine is registered as {rec['email']}, but this repo's git e-mail is {git_email}." if rec else "this machine is not registered yet."))
             have_key = bool(t["team_key"] or os.environ.get("CCKIT_TEAM_KEY"))
-            if interactive or (have_key and identity.detect_email(str(_root(args)), t["allowed_domains"])):
+            if not identity.detect_email(str(_root(args)), t["allowed_domains"]):
+                print(_no_email_hint(t["allowed_domains"]))
+            elif interactive or have_key:
                 try:
                     rc = _register_flow(cfg, _root(args), None, None, None, None)
                     if rc != 0:
@@ -53,15 +55,9 @@ def cmd_init(args) -> int:
     return 0
 
 
-INTRO = ("Claude Code usage (model, token counts and how long turns take: never your prompts, code or replies) is reported to the team app under "
-         "your company e-mail, so the team can see usage and cost. You can switch it off any time with CCKIT_TELEMETRY=off.")
-
-
-def _email_prompt(domains: list[str], found) -> str:
-    doms = " / ".join("@" + d for d in domains)
-    if found:
-        return f"Your company e-mail ({doms}): press Enter to use {found[0]} (from {found[1]}), or type another: "
-    return f"Your company e-mail ({doms}), for example firstname.lastname@{domains[0]}: "
+def _no_email_hint(domains: list[str]) -> str:
+    return (f"No company e-mail found in git config. Usage is reported under the e-mail in `git config user.email`, so run "
+            f"`git config user.email firstname.lastname@{domains[0]}` in this repo (or globally with --global), then `cckit register`; or pass `--email`. Nothing is asked here.")
 
 
 def _registered_for_this_repo(cfg: dict, root: Path) -> bool:
@@ -93,24 +89,12 @@ def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None,
     domains = t["allowed_domains"]
     interactive = sys.stdin.isatty()
     if not email:
-        found = identity.detect_email(str(root), domains)
-        if found and not interactive:
-            email = found[0]
-            print(f"Using {email} (from {found[1]}).")
-        elif interactive:
-            print(INTRO)
-            for _ in range(3):
-                ans = input(_email_prompt(domains, found)).strip()
-                email = ans or (found[0] if found else "")
-                problem = identity.email_problem(email, domains)
-                if not problem:
-                    break
-                print(problem)
-            else:
-                return 2
-        else:
-            print("error: no company e-mail found in git config; pass --email NAME@" + domains[0], file=sys.stderr)
+        found = identity.detect_email(str(root), domains)         # never asked: it is whatever git (or $CCKIT_EMAIL) says
+        if not found:
+            print("error: " + _no_email_hint(domains), file=sys.stderr)
             return 2
+        email = found[0]
+        print(f"Registering as {email} (from {found[1]}). To use another e-mail: cckit register --email NAME@{domains[0]}")
     problem = identity.email_problem(email, domains)
     if problem:
         print(f"error: {problem}", file=sys.stderr)
@@ -224,17 +208,10 @@ def cmd_login(args) -> int:
         email = args.email
         if not email:
             found = identity.detect_email(str(_root(args)), domains)
-            if not interactive:
-                email = found[0] if found else ""
-            else:
-                print(INTRO)
-                for _ in range(3):
-                    ans = input(_email_prompt(domains, found)).strip()
-                    email = ans or (found[0] if found else "")
-                    problem = identity.email_problem(email, domains)
-                    if not problem:
-                        break
-                    print(problem)
+            email = found[0] if found else ""
+            if not found:
+                print("error: " + _no_email_hint(domains), file=sys.stderr)
+                return 2
         token = (args.token or os.environ.get("CCKIT_TOKEN") or "").strip()
         if not token and interactive:
             token = getpass.getpass("Token (the one you were given; typing is hidden): ").strip()

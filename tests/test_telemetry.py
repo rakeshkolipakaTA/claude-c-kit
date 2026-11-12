@@ -290,13 +290,12 @@ def test_register_is_not_interactive_without_an_email(tmp_path, monkeypatch, cap
     assert "--email" in capsys.readouterr().err
 
 
-def test_register_asks_again_after_a_wrong_address(tmp_path, monkeypatch, capsys):
+def test_register_never_asks_for_an_email_even_in_a_terminal(tmp_path, monkeypatch, capsys):
     write_cfg(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    answers = iter(["ada@gmail.com", "nobody", "x@y.z"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
-    assert cli.main(["register", str(tmp_path)]) == 2                  # three wrong answers: gives up, never contacts the server
-    assert capsys.readouterr().out.count("is not a @tigeranalytics.com address") == 3
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked for something: " + prompt))
+    assert cli.main(["register", str(tmp_path)]) == 2                  # nothing in git to take: tells what to set, never asks, never contacts the server
+    assert "git config user.email" in capsys.readouterr().err
 
 
 def test_identity_file_is_private(ident):
@@ -663,15 +662,15 @@ def test_session_start_registers_from_the_git_email_and_tells_the_user(server, t
 
 
 @pytest.mark.skipif(not GIT, reason="needs git")
-def test_session_start_ignores_a_personal_git_email_and_asks(server, tmp_path):
+def test_session_start_ignores_a_personal_git_email_and_only_tells_the_developer(server, tmp_path):
     setup(server, tmp_path)
     git_repo(tmp_path, email="ada.private@gmail.com")
     out = session_start(tmp_path)
-    ctx = out["hookSpecificOutput"]["additionalContext"]
-    assert "company e-mail" in ctx and "@tigeranalytics.com" in ctx and "--register THEIR_EMAIL" in ctx and str(tmp_path) in ctx
-    assert KEY not in ctx and "gmail" not in ctx
+    assert "hookSpecificOutput" not in out                                  # nothing for Claude to ask: no tokens, no question
+    note = out["systemMessage"]
+    assert "git config user.email" in note and "@tigeranalytics.com" in note and "gmail" not in note and KEY not in note
     assert "Claude_Users" not in dump(server)                               # the personal address was never sent anywhere
-    assert session_start(tmp_path) is None                                  # asked recently: not again for a few days
+    assert session_start(tmp_path) is None                                  # told recently: not again for a few days
 
 
 def test_script_register_command_accepts_a_company_email_only(server, tmp_path):
@@ -717,7 +716,7 @@ def test_cckit_init_registers_from_git_without_a_terminal(server, tmp_path, caps
     git_repo(tmp_path, email=ADA, gh_user="octocat")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     assert cli.main(["init", str(tmp_path)]) == 0
-    assert f"Using {ADA} (from git config user.email)" in capsys.readouterr().out
+    assert f"Registering as {ADA} (from git config user.email)" in capsys.readouterr().out
     assert identity.get_identity(server + "/exec")["email"] == ADA
 
 
@@ -1176,12 +1175,12 @@ def init_repo(tmp_path, server, email=ADA, toml_extra="", with_key=False):
 
 
 @pytest.mark.skipif(not GIT, reason="needs git")
-def test_init_asks_for_the_email_offering_the_git_one_then_for_the_team_key(server, tmp_path):
+def test_init_does_not_ask_for_the_email_when_git_has_a_company_one_only_for_the_team_key(server, tmp_path):
     repo = init_repo(tmp_path, server)
-    code, out = run_in_pty(["init", str(repo)], ["", KEY, "n"])
+    code, out = run_in_pty(["init", str(repo)], [KEY, "n"])
     assert code == 0
-    assert f"Your company e-mail (@tigeranalytics.com): press Enter to use {ADA} (from git config user.email), or type another:" in out
-    assert "never your prompts, code or replies" in out and "CCKIT_TELEMETRY=off" in out                    # says what this is for before asking
+    assert "Your company e-mail" not in out                                                                  # git already knows it: the start-up hook would use the same one
+    assert f"Registering as {ADA} (from git config user.email)" in out and "cckit register --email" in out
     assert "Team key (the join code your admin gave you; not a password):" in out and f"Registered {ADA}" in out
     assert "Save the team key?" in out and "Not saved" in out
     assert identity.get_identity(server + "/exec")["email"] == ADA
@@ -1191,7 +1190,7 @@ def test_init_asks_for_the_email_offering_the_git_one_then_for_the_team_key(serv
 @pytest.mark.skipif(not GIT, reason="needs git")
 def test_init_can_save_the_team_key_so_teammates_register_automatically(server, tmp_path):
     repo = init_repo(tmp_path, server)
-    code, out = run_in_pty(["init", str(repo)], ["", KEY, "y"])
+    code, out = run_in_pty(["init", str(repo)], [KEY, "y"])
     assert code == 0 and "Saved to .cckit/key.json" in out
     assert json.loads(read(repo / ".cckit/key.json")) == {"key": KEY}
     assert KEY not in read(repo / ".cckit/cckit.toml") and not any(KEY in read(p) for p in (repo / ".claude").rglob("*.py")) and not any(KEY in read(p) for p in (repo / ".cckit/hooks").glob("*.py"))
@@ -1199,30 +1198,21 @@ def test_init_can_save_the_team_key_so_teammates_register_automatically(server, 
 
 
 @pytest.mark.skipif(not GIT, reason="needs git")
-def test_init_accepts_a_different_company_email_than_git_has(server, tmp_path):
-    repo = init_repo(tmp_path, server)
-    code, out = run_in_pty(["init", str(repo)], ["other.person@tigeranalytics.com", KEY, "n"])
-    assert code == 0 and "Registered other.person@tigeranalytics.com" in out
-    assert identity.get_identity(server + "/exec")["email"] == "other.person@tigeranalytics.com"
+def test_init_never_asks_for_an_email_and_says_what_to_set_when_git_has_only_a_personal_one(server, tmp_path):
+    repo = init_repo(tmp_path, server, email="me@gmail.com")
+    code, out = run_in_pty(["init", str(repo)], [])
+    assert code == 0 and "git config user.email" in out and "Your company e-mail" not in out and "Team key (" not in out
+    assert identity.get_identity(server + "/exec") is None and (repo / ".claude/settings.json").exists()
 
 
 @pytest.mark.skipif(not GIT, reason="needs git")
 def test_init_does_not_fail_when_the_team_key_is_wrong(server, tmp_path):
     repo = init_repo(tmp_path, server)
-    code, out = run_in_pty(["init", str(repo)], ["", "wrong-key"])
+    code, out = run_in_pty(["init", str(repo)], ["wrong-key"])
     assert code == 0                                                           # the files were written: init itself worked
     assert "wrong team key" in out and "Registration did not complete" in out and "Save the team key?" not in out
     assert identity.get_identity(server + "/exec") is None
     assert (repo / ".claude/settings.json").exists()
-
-
-@pytest.mark.skipif(not GIT, reason="needs git")
-def test_init_with_no_company_email_in_git_asks_and_refuses_personal_addresses(server, tmp_path):
-    repo = init_repo(tmp_path, server, email="me@gmail.com")
-    code, out = run_in_pty(["init", str(repo)], ["a@gmail.com", "b@yahoo.com", "c@x.org"])
-    assert code == 0 and out.count("is not a @tigeranalytics.com address") == 3 and "Registration did not complete" in out
-    assert "from git config" not in out.split("Your company e-mail")[1].split(":")[0]            # no default offered: the personal address is never suggested
-    assert identity.get_identity(server + "/exec") is None
 
 
 @pytest.mark.skipif(not GIT, reason="needs git")
@@ -1243,9 +1233,9 @@ def test_init_does_not_ask_again_on_a_machine_that_is_already_registered(server,
 
 
 @pytest.mark.skipif(not GIT, reason="needs git")
-def test_init_with_the_key_already_in_the_toml_only_asks_for_the_email(server, tmp_path):
+def test_init_with_the_key_already_in_the_file_asks_nothing(server, tmp_path):
     repo = init_repo(tmp_path, server, with_key=True)
-    code, out = run_in_pty(["init", str(repo)], [""])
+    code, out = run_in_pty(["init", str(repo)], [])
     assert code == 0 and "Team key (" not in out and "Save the team key?" not in out and f"Registered {ADA}" in out
 
 
@@ -1406,10 +1396,10 @@ def test_login_refuses_a_foreign_email_and_a_bad_token(tmp_path, monkeypatch, ca
 
 def test_login_prompts_with_hidden_token(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda prompt="": ADA)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked for something: " + prompt))      # the e-mail is never asked
     asked = []
     monkeypatch.setattr("getpass.getpass", lambda prompt="": asked.append(prompt) or "tok_ABCDEF123456")
-    assert cli.main(["login", str(tmp_path), "--no-init"]) == 0
+    assert cli.main(["login", str(tmp_path), "--email", ADA, "--no-init"]) == 0
     assert asked and not (tmp_path / ".cckit/cckit.toml").exists()                                       # --no-init: login only
     assert identity.get_identity(config.identity_key(config.load(tmp_path)["telemetry"]))["token"] == "tok_ABCDEF123456"
 
