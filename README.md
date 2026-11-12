@@ -3,9 +3,11 @@
 A small Python package that writes **cost-saving Claude Code configuration into a repo**, so every developer who opens
 the repo gets the same cheap, safe defaults without setting anything up by hand.
 
-## Quick start
+**Who does what.** The **team lead** installs cckit once, sets a repo up, and commits the result. **Everyone else just runs `git pull`**: they do not install or run anything. Upgrading and uninstalling are the lead's job too.
 
-You need Python 3.10+ and git. Install cckit once per machine, in its own virtual environment so it never touches your other Python packages.
+## Quick start (team lead)
+
+You need Python 3.10+ and git. Install cckit once on your machine, in its own virtual environment so it never touches your other Python packages.
 
 **Linux / macOS**
 ```bash
@@ -22,31 +24,35 @@ py -m venv $env:USERPROFILE\.cckit-venv
 ```
 Open a new terminal and check: `cckit --version`.
 
-**Then, in each repo** (the admin does this once; everyone else just runs `git pull`):
+**Then, in each repo, once:**
 ```bash
 cd your-repo
 cckit init
 git add CLAUDE.md .claude .cckit && git commit -m "Add cckit" && git push
 ```
-`cckit init` asks for your company e-mail (press Enter to accept the suggestion) and, the first time, the team key your admin gave you.
+`cckit init` asks for your company e-mail (press Enter to accept the suggestion) and, the first time, the team key.
 
-**Teammates** only `git pull`. cckit does not need to be installed for them; Claude Code asks them once to trust the folder, and the first session registers them (they see one line saying so). To switch the usage reporting off on one machine: `CCKIT_TELEMETRY=off`.
+## Everyone else
 
-## Upgrade
+`git pull`, then work as usual. They need nothing installed except Python 3 on the PATH (the hooks are small Python files). Claude Code asks them once to trust the folder, and their first session registers them for usage reporting (they see one line saying so). Anyone can switch the reporting off on their own machine with `CCKIT_TELEMETRY=off`.
+
+For that automatic registration the lead can commit the team key in `.cckit/key.json` as `{"key": "..."}` (**private repositories only**); without it each person runs `cckit register` once, or sets `CCKIT_TEAM_KEY`.
+
+## Upgrade (team lead)
 
 ```bash
 ~/.cckit-venv/bin/pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.6"     # Windows: use ...\.cckit-venv\Scripts\pip.exe
 cd your-repo && cckit init && git add CLAUDE.md .claude .cckit && git commit -m "Update cckit" && git push
 ```
-Use the newest tag (`git ls-remote --tags --refs --sort=-v:refname https://github.com/rakeshkolipakaTA/claude-c-kit.git | head -3`). Pin the same tag for everyone and let one person commit the regenerated files. Coming from before 0.2.2, `cckit init` moves the old files into `.cckit/` by itself.
+Use the newest tag (`git ls-remote --tags --refs --sort=-v:refname https://github.com/rakeshkolipakaTA/claude-c-kit.git | head -3`). The lead commits the regenerated files and the others `git pull`, so everyone ends up on the same version. Coming from before 0.2.2, `cckit init` moves the old files into `.cckit/` by itself.
 
-## Uninstall or start fresh
+## Uninstall or start fresh (team lead)
 
 ```bash
 cckit uninstall        # in a repo: lists what it will remove, asks, then removes only what cckit added
 cckit reinstall        # in a repo: uninstall, then install again (for a repo where something broke)
 ```
-Your own `CLAUDE.md` text, `.gitignore` lines and settings stay. Your `.cckit/cckit.toml`, team key and local usage log are kept too, unless you add `--purge`. `--dry-run` shows the list without removing anything. Teammates just `git pull`.
+Your own `CLAUDE.md` text, `.gitignore` lines and settings stay. Your `.cckit/cckit.toml`, team key and local usage log are kept too, unless you add `--purge`. `--dry-run` shows the list without removing anything. Everyone else just `git pull`s.
 
 To remove cckit from a machine, delete its folder: `rm -rf ~/.cckit-venv ~/.local/bin/cckit` (Windows: `Remove-Item -Recurse -Force $env:USERPROFILE\.cckit-venv`). Repos keep working without it.
 
