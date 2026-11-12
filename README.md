@@ -12,14 +12,14 @@ You need Python 3.10+ and git. Install cckit once on your machine, in its own vi
 **Linux / macOS**
 ```bash
 python3 -m venv ~/.cckit-venv
-~/.cckit-venv/bin/pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.6"
+~/.cckit-venv/bin/pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.7"
 mkdir -p ~/.local/bin && ln -sf ~/.cckit-venv/bin/cckit ~/.local/bin/cckit
 ```
 
 **Windows (PowerShell)**
 ```powershell
 py -m venv $env:USERPROFILE\.cckit-venv
-& "$env:USERPROFILE\.cckit-venv\Scripts\pip.exe" install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.6"
+& "$env:USERPROFILE\.cckit-venv\Scripts\pip.exe" install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.7"
 [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:USERPROFILE\.cckit-venv\Scripts", "User")
 ```
 Open a new terminal and check: `cckit --version`.
@@ -41,7 +41,7 @@ For that automatic registration the lead can commit the team key in `.cckit/key.
 ## Upgrade (team lead)
 
 ```bash
-~/.cckit-venv/bin/pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.6"     # Windows: use ...\.cckit-venv\Scripts\pip.exe
+~/.cckit-venv/bin/pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.7"     # Windows: use ...\.cckit-venv\Scripts\pip.exe
 cd your-repo && cckit init && git add CLAUDE.md .claude .cckit && git commit -m "Update cckit" && git push
 ```
 Use the newest tag (`git ls-remote --tags --refs --sort=-v:refname https://github.com/rakeshkolipakaTA/claude-c-kit.git | head -3`). The lead commits the regenerated files and the others `git pull`, so everyone ends up on the same version. Coming from before 0.2.2, `cckit init` moves the old files into `.cckit/` by itself.
