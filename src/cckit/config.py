@@ -23,7 +23,8 @@ DEFAULT_TOML = '''\
 [model]
 default = "sonnet"            # alias (sonnet | haiku | opus | fable) or a full model name. "sonnet" is Sonnet 5.5 on the
                               # Anthropic API; cloud providers map it to their own version, so pin a full name there.
-effort = "high"               # low | medium | high | xhigh  (settings key effortLevel; developers can still use /effort)
+effort = "medium"             # low | medium | high | xhigh  (settings key effortLevel; developers can still use /effort). medium is the default of Sonnet 5.5, Opus 5.5
+                              # and Haiku 5.5; "high" costs more thinking tokens on every request and is worth it for verification-heavy work
 subagent = "haiku"            # model for subagents that do not pick their own (env CLAUDE_CODE_SUBAGENT_MODEL)
 subagent_force = false        # true = every subagent uses the model above, even if its file says otherwise
 block_opus_subagents = true   # deny rule Agent(model:opus): subagents may not be started on Opus
@@ -35,6 +36,11 @@ auto_compact_window = 200000  # tokens, 100000..1000000 (env CLAUDE_CODE_AUTO_CO
 auto_compact_pct = 50         # 1..100: compact when this % of the window is used. It can only LOWER the default.
 cap_context_to_200k = true    # env CLAUDE_CODE_DISABLE_1M_CONTEXT=1 (newer models default to a 1M window)
 claude_md_max_lines = 200     # `cckit doctor` fails when CLAUDE.md or a rules file is longer
+
+[rules]                       # starter rule files in .claude/rules/ (yours to edit: once you change one, cckit never overwrites it)
+coding_standards = true       # coding-standards.md: general standards and security basics, always loaded (about 25 lines)
+git_workflow = true           # git-workflow.md: commit and pull request conventions, always loaded (about 8 lines)
+languages = "auto"            # language rules, loaded ONLY when Claude touches those files: "auto" (found in the repo), or a list such as ["python", "typescript", "java"], or []
 
 [thinking]
 max_tokens = 0                # 0 = leave unset. Only works on models with a FIXED thinking budget.
@@ -71,7 +77,8 @@ tail_lines = 100
 
 [permissions]
 # Files Claude must not read (keeps big or generated files out of the context). Gitignore-style patterns.
-deny_reads = ["node_modules/**", ".venv/**", "venv/**", "dist/**", "build/**", "**/__pycache__/**", "**/*.min.js", "**/*.map"]
+deny_reads = ["**/node_modules/**", "**/.venv/**", "**/venv/**", "dist/**", "build/**", "**/__pycache__/**", "**/*.min.js", "**/*.map"]   # best effort: also applied to Grep/Glob and
+                              # recognised file commands (cat, head ...), not to every way a subprocess can read a file
 
 [monitoring]
 statusline = true             # show model, context % and session cost at the bottom of Claude Code
@@ -122,6 +129,7 @@ max_effort_level = "high"
 '''
 
 EFFORTS = ("low", "medium", "high", "xhigh")
+LANGUAGES = ("python", "typescript", "java")
 MODEL_ALIASES = ("sonnet", "haiku", "opus", "fable")
 
 
@@ -314,6 +322,13 @@ def validate(cfg: dict) -> list[str]:
     ev = tel.get("events")
     if not isinstance(ev, list) or not ev or not set(ev) <= {"auto", "manual"}:
         errs.append('[telemetry] events must be a non-empty list of "auto" and/or "manual"')
+    rl = cfg.get("rules", {})
+    for k in ("coding_standards", "git_workflow"):
+        if not isinstance(rl.get(k), bool):
+            errs.append(f"[rules] {k} must be true or false")
+    langs = rl.get("languages")
+    if not (langs == "auto" or (isinstance(langs, list) and all(isinstance(x, str) and x in LANGUAGES for x in langs))):
+        errs.append('[rules] languages must be "auto" or a list of: ' + ", ".join(LANGUAGES))
     if not isinstance(tel.get("stop_report"), bool):
         errs.append("[telemetry] stop_report must be true or false")
     if not _is_int(tel.get("stop_interval")) or not 0 <= tel["stop_interval"] <= 3600:

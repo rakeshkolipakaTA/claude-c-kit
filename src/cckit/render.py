@@ -230,7 +230,7 @@ def build_claude_md_block(cfg: dict) -> str:
 - Keep noisy work out of the main conversation: use the `explorer` subagent to find code, `test-runner` to run tests,
   `reviewer` to review a diff. They return a short summary.
 - Never paste or read whole logs or large generated files. Show the failing tests and the last ~50 lines.
-- Do not re-read a file that is already in the conversation. Prefer grep or a line range over reading a large file.
+- Do not re-read a file that is already in the conversation unless it may have changed since (an edit, a git operation, a tool run). Prefer grep or a line range over reading a large file.
 - Run only the tests that cover the change. Run the full suite once, at the end.
 - If an approach fails twice, stop and ask instead of trying a third variation.
 - Between unrelated tasks run `/clear`. At a natural break in a long task run `/compact`.
@@ -286,6 +286,59 @@ def remove_block(existing: str) -> str | None:
 
 
 # ----------------------------------------------------------------------------- rules and subagents
+CODING_STANDARDS = """\
+# Coding standards (starter defaults: edit them to match this team)
+- Follow the style and patterns of the file you are editing. Do not reformat code you did not change.
+- Keep a change small and focused: one concern at a time, no drive-by refactors.
+- Names say what a thing is or does. A function does one thing; split one that needs a long comment to explain itself.
+- Handle errors explicitly. Never swallow an exception silently: log it or return it with context. Validate input at the boundary.
+- No secrets, tokens, passwords or personal data in code, logs, tests or commits. Read them from the environment or a secret store.
+- Add or update a test with every behaviour change. A bug fix gets a test that fails without the fix.
+- Comment why, not what. Delete dead and commented-out code instead of keeping it.
+- Do not add a dependency for something the standard library or the project already does.
+- Run the project's formatter and linter before you finish.
+"""
+
+GIT_WORKFLOW = """\
+# Git and review (starter defaults: edit them to match this team)
+- Commit message: a short imperative subject (about 50 characters), a blank line, then why the change was made.
+- One logical change per commit and per pull request. Do not mix a refactor with a behaviour change.
+- Work on a branch and open a pull request. Never force-push or rewrite shared history.
+- Check `git status` before committing: no generated files, build output, secrets or local settings.
+- A pull request says what changed, why, and how it was tested.
+"""
+
+LANGUAGE_RULES = {
+    "python": (["**/*.py"], """\
+# Python (starter defaults: edit them to match this team)
+- Format with the project's formatter (black or ruff format) and lint with ruff or flake8. Do not fight their config.
+- Type-hint public functions and their return values. Keep `Any` out of new code.
+- Catch specific exceptions, never a bare `except:`. Use `raise ... from err` to keep the cause.
+- Use `pathlib` for paths, f-strings for formatting, context managers for files and connections, and `logging` instead of `print`.
+- No mutable default arguments. Prefer a dataclass or typed dict to a loose dict for structured data.
+- Tests use pytest with plain `assert`. Keep them independent and fast, with no real network or clock.
+"""),
+    "typescript": (["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"], """\
+# TypeScript / JavaScript (starter defaults: edit them to match this team)
+- Keep `strict` on and avoid `any`: use `unknown` and narrow it. Type the signatures of exported functions.
+- `const` by default, never `var`. Prefer `async`/`await` to promise chains and always handle rejections.
+- Use `===`. Do not mutate function arguments.
+- Format with Prettier and lint with ESLint as configured. A lint disable needs a comment saying why.
+- Prefer named exports. One concern per module.
+- Tests use the project's runner (Jest, Vitest ...). Test behaviour, not implementation, and mock only at the boundaries.
+"""),
+    "java": (["**/*.java"], """\
+# Java (starter defaults: edit them to match this team)
+- Follow the project's formatter and style checks (Google Java Style or the team's Checkstyle).
+- Prefer immutability: `final` fields and immutable collections. Use constructor injection, not field injection.
+- Never catch `Exception` or `Throwable` broadly or swallow an exception. Use try-with-resources for anything closeable.
+- Return empty collections, not `null`. Use `Optional` for return values only, not for fields or parameters.
+- Log with SLF4J placeholders, never `System.out`. Never log secrets or personal data.
+- Tests use JUnit 5: one behaviour per test, clear names, no sleeps.
+"""),
+}
+
+
 def build_rules(cfg: dict) -> dict[str, str]:
     testing = """\
 ---
@@ -301,7 +354,19 @@ paths:
 - Use the `test-runner` subagent for long test runs. Report only failing tests and their first error lines.
 - Do not paste full test output into the conversation.
 """
-    return {".claude/rules/testing.md": testing}
+    files = {".claude/rules/testing.md": testing}
+    r = cfg.get("rules") or {}
+    if r.get("coding_standards"):
+        files[".claude/rules/coding-standards.md"] = CODING_STANDARDS
+    if r.get("git_workflow"):
+        files[".claude/rules/git-workflow.md"] = GIT_WORKFLOW
+    langs = r.get("languages")
+    langs = r.get("_detected", []) if langs == "auto" else (langs or [])
+    for lang in langs:
+        if lang in LANGUAGE_RULES:                      # path-scoped: loaded only when Claude touches these files
+            paths, body = LANGUAGE_RULES[lang]
+            files[f".claude/rules/{lang}.md"] = "---\npaths:\n" + "".join(f'  - "{p}"\n' for p in paths) + "---\n\n" + body
+    return files
 
 
 AGENT_BODIES = {

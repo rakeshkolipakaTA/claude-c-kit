@@ -73,7 +73,7 @@ def test_invalid_toml_is_a_clear_error(repo):
 def test_settings_contain_every_requested_control():
     s = render.build_settings(config.defaults())
     env = s["env"]
-    assert s["model"] == "sonnet" and s["effortLevel"] == "high"
+    assert s["model"] == "sonnet" and s["effortLevel"] == "medium"
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "haiku"
     assert env["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] == "4"
     assert env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] == "1"
@@ -82,7 +82,7 @@ def test_settings_contain_every_requested_control():
     assert env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] == "1"
     assert env["ENABLE_TOOL_SEARCH"] == "true"
     assert "Agent(model:opus)" in s["permissions"]["deny"]
-    assert "Read(node_modules/**)" in s["permissions"]["deny"]
+    assert "Read(**/node_modules/**)" in s["permissions"]["deny"] and "Read(dist/**)" in s["permissions"]["deny"]      # nested packages too; dist/build stay root-anchored (a source folder may be called build)
     assert s["hooks"]["PreToolUse"][0]["matcher"] == "Bash"
     assert s["statusLine"]["type"] == "command"
     assert all(isinstance(v, str) for v in env.values()), "settings env values must be strings"
@@ -261,7 +261,8 @@ def test_hook_rewrites_plain_test_runs(repo, cmd):
     out = json.loads(run_script(repo / ".cckit/hooks/trim_output.py", {"tool_name": "Bash", "tool_input": {"command": cmd, "description": "d"}}))
     upd = out["hookSpecificOutput"]["updatedInput"]
     assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
-    assert upd["command"] == f"set -o pipefail; {cmd} 2>&1 | tail -n 100" and upd["description"] == "d"
+    script = str(repo / ".cckit/hooks/trim_output.py").replace("\\", "/")
+    assert upd["command"] == f'set -o pipefail; {cmd} 2>&1 | "{sys.executable}" "{script}" --trim' and upd["description"] == "d"
 
 
 @pytest.mark.parametrize("cmd", ["pytest | grep x", "ls; pytest", "pytest && rm -rf x", "pytest > out.txt", "echo $(pytest)", "pytest # c", "cat file", "git status", "pytest `whoami`"])
@@ -280,15 +281,15 @@ def test_hook_ignores_other_tools_and_garbage(repo):
 def test_hook_keeps_the_exit_code(repo):
     apply.init(repo)
     out = json.loads(run_script(repo / ".cckit/hooks/trim_output.py", {"tool_name": "Bash", "tool_input": {"command": "pytest"}}))
-    cmd = out["hookSpecificOutput"]["updatedInput"]["command"].replace("pytest", "false")
-    assert subprocess.run(["bash", "-c", cmd]).returncode != 0
+    cmd = out["hookSpecificOutput"]["updatedInput"]["command"].replace("pytest 2>&1", "false 2>&1", 1)
+    assert subprocess.run(["bash", "-c", cmd]).returncode != 0                      # the failing command's status survives the filter
 
 
 def test_hook_tail_lines_follow_config(repo):
     (repo / ".cckit/cckit.toml").write_text("[hooks]\ntail_lines = 40\n")
     apply.init(repo)
     out = json.loads(run_script(repo / ".cckit/hooks/trim_output.py", {"tool_name": "Bash", "tool_input": {"command": "pytest"}}))
-    assert out["hookSpecificOutput"]["updatedInput"]["command"].endswith("tail -n 40")
+    assert "TAIL_LINES = 40" in read(repo / ".cckit/hooks/trim_output.py")
 
 
 def test_statusline(repo):
@@ -656,3 +657,79 @@ def test_uninstall_leaves_this_machines_registration_alone(repo):
     apply.init(repo)
     cli.main(["uninstall", str(repo), "--purge", "--yes"])
     assert identity.get_identity("https://e/api/usage")["token"] == "tok-ada"
+
+
+def trim_run(repo, lines, tail=None):
+    script = repo / ".cckit/hooks/trim_output.py"
+    return subprocess.run([sys.executable, str(script), "--trim"], input="\n".join(lines) + "\n", capture_output=True, text=True, check=True).stdout
+
+
+def test_trim_keeps_failures_from_the_middle_and_the_summary(repo):
+    apply.init(repo)                                                                  # tail_lines = 100, head 10, at most 60 failure lines
+    lines = [f"collected {i}" for i in range(500)]
+    lines[200] = "FAILED tests/a.py::test_one - AssertionError: 1 != 2"
+    lines[300] = "E   Traceback (most recent call last):"
+    lines[-1] = "== 2 failed, 498 passed in 3.2s =="
+    out = trim_run(repo, lines)
+    assert "FAILED tests/a.py::test_one" in out and "Traceback" in out and "2 failed, 498 passed" in out and "collected 0" in out
+    assert "lines left out" in out and out.count("\n") < 200                           # bounded: head + failures + tail + notes
+
+
+def test_trim_passes_short_output_whole_and_caps_the_failure_lines(repo):
+    apply.init(repo)
+    short = [f"ok {i}" for i in range(50)]
+    assert trim_run(repo, short) == "\n".join(short) + "\n"                            # nothing left out when it is short
+    noisy = ["FAILED test_%d" % i for i in range(1000)]
+    out = trim_run(repo, noisy)
+    assert out.count("FAILED") <= 10 + 60 + 100 and out.count("\n") <= 10 + 60 + 100 + 10   # a run where everything fails stays bounded
+
+
+# ------------------------------------------------------------------ coding standards and language rules
+def rule_files(repo):
+    return sorted(p.name for p in (repo / ".claude/rules").glob("*.md"))
+
+
+def test_rules_are_generated_and_the_language_ones_only_for_languages_in_the_repo(repo):
+    (repo / "app").mkdir()
+    (repo / "app/main.py").write_text("print(1)\n")
+    (repo / "web").mkdir()
+    (repo / "web/package.json").write_text("{}")
+    (repo / "node_modules/x").mkdir(parents=True)
+    (repo / "node_modules/x/Thing.java").write_text("class Thing {}")                # dependency folders are not looked into
+    apply.init(repo)
+    assert rule_files(repo) == ["coding-standards.md", "git-workflow.md", "python.md", "testing.md", "typescript.md"]
+    py = read(repo / ".claude/rules/python.md")
+    assert py.startswith('---\npaths:\n  - "**/*.py"\n---')                         # loaded only when Claude touches Python files
+    assert not read(repo / ".claude/rules/coding-standards.md").startswith("---")     # general standards: always loaded, and short
+    assert sum(len(read(repo / f".claude/rules/{n}").splitlines()) for n in ("coding-standards.md", "git-workflow.md")) < 30
+
+
+def test_rules_can_be_switched_off_or_chosen(repo):
+    (repo / "A.java").write_text("class A {}")
+    (repo / ".cckit/cckit.toml").write_text('[rules]\ncoding_standards = false\ngit_workflow = false\nlanguages = ["python"]\n')
+    apply.init(repo)
+    assert rule_files(repo) == ["python.md", "testing.md"]                           # the list wins over what was detected
+    (repo / ".cckit/cckit.toml").write_text('[rules]\nlanguages = []\n')
+    apply.init(repo)
+    assert rule_files(repo) == ["coding-standards.md", "git-workflow.md", "testing.md"]        # python.md was ours and unedited: removed
+    (repo / ".cckit/cckit.toml").write_text('[rules]\nlanguages = ["cobol"]\n')
+    with pytest.raises(ValueError):
+        apply.init(repo)
+
+
+def test_an_edited_rule_file_is_never_overwritten_and_survives_uninstall(repo):
+    apply.init(repo)
+    mine = repo / ".claude/rules/coding-standards.md"
+    mine.write_text("# Our standards\n- Tabs, always.\n")
+    apply.init(repo)
+    assert read(mine) == "# Our standards\n- Tabs, always.\n"
+    cli.main(["uninstall", str(repo), "--yes"])
+    assert mine.exists() and read(mine) == "# Our standards\n- Tabs, always.\n"
+
+
+def test_effort_default_is_the_models_own_and_deny_globs_reach_nested_folders(repo):
+    s = render.build_settings(config.defaults())
+    assert s["effortLevel"] == "medium"
+    deny = s["permissions"]["deny"]
+    assert "Read(**/node_modules/**)" in deny and "Read(**/venv/**)" in deny and "Read(dist/**)" in deny and "Read(**/dist/**)" not in deny
+    assert 'unless it may have changed' in render.build_claude_md_block(config.defaults())

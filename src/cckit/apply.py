@@ -24,6 +24,32 @@ CLAUDE_MD = "CLAUDE.md"
 EXECUTABLE = {render.TRIM_SCRIPT, render.STATUS_SCRIPT, render.COMPACT_SCRIPT, render.LOG_SCRIPT, render.REPORT_SCRIPT, render.OPUS_SCRIPT}
 
 
+LANG_MARKERS = {"python": ("pyproject.toml", "requirements.txt", "setup.py", "Pipfile"), "typescript": ("tsconfig.json", "package.json"),
+                "java": ("pom.xml", "build.gradle", "build.gradle.kts")}
+LANG_EXT = {".py": "python", ".ts": "typescript", ".tsx": "typescript", ".js": "typescript", ".jsx": "typescript", ".java": "java"}
+SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "env", "dist", "build", "target", "__pycache__", ".idea", ".cckit", ".claude", "site-packages"}
+
+
+def detect_languages(root: Path, max_files: int = 4000) -> list[str]:
+    """Languages found in the repo (by marker file or source file), looked for in a bounded walk that skips dependency and build folders."""
+    import os
+    found: set[str] = set()
+    seen = 0
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
+        for f in files:
+            seen += 1
+            ext = os.path.splitext(f)[1].lower()
+            if ext in LANG_EXT:
+                found.add(LANG_EXT[ext])
+            for lang, marks in LANG_MARKERS.items():
+                if f in marks:
+                    found.add(lang)
+        if seen >= max_files or len(found) == len(config.LANGUAGES):
+            break
+    return [lang for lang in config.LANGUAGES if lang in found]
+
+
 def claude_md_path(root: Path) -> Path:
     """./CLAUDE.md, or ./.claude/CLAUDE.md when that is the one the repository already uses (both are valid project memory files)."""
     root = Path(root)
@@ -212,6 +238,8 @@ def init(root: Path, force: bool = False, dry_run: bool = False) -> Result:
     res = Result()
     cfg_path = root / config.CONFIG_NAME
     cfg = config.load(root)                                  # defaults when .cckit/cckit.toml does not exist yet
+    if cfg.get("rules", {}).get("languages") == "auto":
+        cfg["rules"]["_detected"] = detect_languages(root)
     errors = config.validate(cfg)
     if errors:
         raise ValueError(".cckit/cckit.toml has problems:\n  - " + "\n  - ".join(errors))
@@ -241,6 +269,8 @@ def init(root: Path, force: bool = False, dry_run: bool = False) -> Result:
             _move_team_key(root, cfg_path, cfg, res)
             _move_default_csv(root, cfg_path, res)
             cfg = config.load(root)
+            if cfg.get("rules", {}).get("languages") == "auto":
+                cfg["rules"]["_detected"] = detect_languages(root)
     elif not cfg_path.exists():
         res.add("created", config.CONFIG_NAME, "defaults; edit it and run init again")
         if not dry_run:
@@ -251,6 +281,8 @@ def init(root: Path, force: bool = False, dry_run: bool = False) -> Result:
         _move_team_key(root, cfg_path, cfg, res)
         _move_default_csv(root, cfg_path, res)
         cfg = config.load(root)
+        if cfg.get("rules", {}).get("languages") == "auto":
+            cfg["rules"]["_detected"] = detect_languages(root)
 
     manifest = load_manifest(root)
     new_files: dict[str, str] = {}

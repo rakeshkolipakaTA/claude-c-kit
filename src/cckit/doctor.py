@@ -238,7 +238,7 @@ def run(root: Path, check_claude: bool = True) -> Report:
     if cfg["context"]["auto_compact_pct"] > 80:
         r.add("warn", "[context] auto_compact_pct above 80 saves little; 50 to 70 keeps long sessions cheaper")
     if cfg["model"]["effort"] in ("high", "xhigh"):
-        r.add("info", f"effort is '{cfg['model']['effort']}': more thinking tokens per request than the model default (Sonnet 5.5 defaults to medium). Developers can lower it per task with /effort.")
+        r.add("info", f"effort is '{cfg['model']['effort']}': more thinking tokens on every request than the default of Sonnet 5.5, Opus 5.5 and Haiku 5.5 (medium). Keep it for verification-heavy work; developers can change it per task with /effort.")
     if cfg["model"]["default"] in config.MODEL_ALIASES:
         r.add("info", f"model '{cfg['model']['default']}' is an alias: its version depends on how your developers connect (Anthropic API vs a cloud provider). Pin a full name if they differ.")
     if cfg["tools"]["tool_search"] == "false":

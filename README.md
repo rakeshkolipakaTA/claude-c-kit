@@ -73,10 +73,24 @@ Everything cckit owns lives in `.cckit/` (`cckit.toml` settings, `key.json` opti
 | `CLAUDE.md` | a short block of working agreements plus *Compact instructions*, between `cckit` markers (your own text stays) |
 | `.claude/agents/` | `explorer` (Haiku, read-only), `test-runner` (Haiku), `reviewer` (Sonnet, read-only), each with `maxTurns` |
 | `.claude/rules/testing.md` | a path-scoped rule: loads only when Claude touches tests |
-| `.cckit/hooks/trim_output.py` | keeps the last 100 lines of `pytest`, `npm test`, `go test` ... output (exit code preserved) |
+| `.claude/rules/coding-standards.md`, `git-workflow.md` | starter standards (general coding rules with security basics; commit and pull-request conventions), about 30 lines in all, always loaded |
+| `.claude/rules/python.md`, `typescript.md`, `java.md` | starter language rules for the languages found in the repo, **loaded only when Claude touches those files** |
+| `.cckit/hooks/trim_output.py` | shortens the output of `pytest`, `npm test`, `go test` ...: the first 10 lines, up to 60 lines that report a failure, and the last 100 (the summary); short output is shown whole, the exit code is preserved |
 | `.cckit/hooks/statusline.py` | `[Model] ctx 42% $0.31`, with a `/compact or /clear` warning at 60% |
 | `.cckit/mcp-profiles/*.json` | MCP server sets for `cckit run --profile NAME` |
 | `.cckit/managed-settings.example.json` | for an **admin**: OpenTelemetry, allowed models, effort cap |
+
+## Standards and instructions your team can own
+
+The rule files are **starters**: edit them to your team's real standards and commit them. Once you change a file, `cckit init` never overwrites it (and `cckit uninstall` keeps it). Every always-loaded line is paid for on every request, so the always-on files are short (about 30 lines together) and the language files are path-scoped, which means they load only when Claude touches matching files. Docs guidance: keep each instruction file under 200 lines, specific and checkable. Switch them in `.cckit/cckit.toml`:
+
+```toml
+[rules]
+coding_standards = true          # .claude/rules/coding-standards.md
+git_workflow = true              # .claude/rules/git-workflow.md
+languages = "auto"               # or ["python", "typescript", "java"], or [] for none
+```
+Two limits from the Claude Code docs: path-scoped rules are not kept across a compaction (they reload when a matching file is touched again), and `Read(...)` deny rules are best effort: they apply to Read, Grep and Glob and to recognised file commands such as `cat`, not to every way a subprocess can read a file. `Agent(model:opus)` matches only a subagent started with the alias `opus`, so a hard ban on a model needs the managed settings file.
 
 ## If the repository already has a CLAUDE.md
 
@@ -93,7 +107,7 @@ Every setting name below was checked against the official Claude Code docs. Item
 
 | Item | Setting | Notes |
 |---|---|---|
-| Default Sonnet, high reasoning | `"model": "sonnet"`, `"effortLevel": "high"` | `sonnet` is Sonnet 5.5 on the Anthropic API; other providers map it to their own version, so pin a full name in `[model] default`. High effort costs more than the Sonnet 5.5 default (medium); developers can lower it per task with `/effort`. |
+| Default Sonnet, medium reasoning | `"model": "sonnet"`, `"effortLevel": "medium"` | `sonnet` is Sonnet 5.5 on the Anthropic API; other providers map it to their own version, so pin a full name in `[model] default`. `medium` is the default of Sonnet 5.5, Opus 5.5 and Haiku 5.5 (the docs recommend it for cost-sensitive work); set `effort = "high"` under `[model]` for verification-heavy repos, or raise it per task with `/effort`. A committed `effortLevel` applies to every model. |
 | Keep CLAUDE.md under 200 lines | generated file is ~20 lines; `cckit doctor` fails above `claude_md_max_lines` | Applies to `CLAUDE.md`, nested ones and `.claude/rules/*.md`. |
 | Clear between unrelated tasks, compact | working agreements + `# Compact instructions` in `CLAUDE.md` | A habit; CLAUDE.md is guidance, not enforcement. |
 | `MAX_THINKING_TOKENS` 8k to 10k | **changed** | Sonnet 5+, Haiku 5.5 and Opus 4.7+ always use adaptive reasoning and ignore it. cckit only writes it when `[thinking] fixed_budget = true` (Opus/Sonnet 4.6) and warns otherwise. Use `effort` instead. |
