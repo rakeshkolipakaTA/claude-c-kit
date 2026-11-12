@@ -58,10 +58,9 @@ cckit doctor                # checks the repo against .cckit/cckit.toml
 git add CLAUDE.md .claude .cckit && git commit -m "Add cckit"
 ```
 
-### Upgrade, remove, and troubleshooting
+### Remove and troubleshooting
 
-- **Upgrade** (use the new tag; then run `cckit init` once in each repo and commit the result):
-  `~/.cckit-venv/bin/python -m pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@vX.Y.Z"` (Windows: `& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install --upgrade "git+...@vX.Y.Z"`). Replace `vX.Y.Z` with the tag you are moving to.
+- **Upgrade:** see [Upgrading](#upgrading) below.
 - **Remove cckit itself:** delete the environment folder (`rm -rf ~/.cckit-venv`, or `Remove-Item -Recurse $env:USERPROFILE\.cckit-venv`). Repos keep working: the files cckit generated are plain files and do not need cckit.
 - **`cckit` is "not found":** run it through Python instead, which is the same program: `~/.cckit-venv/bin/python -m cckit init` (Windows: `& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m cckit init`).
 - **`requires a different Python` (for example `3.9.x not in '>=3.10'`):** the environment was created with an old Python. Check with `python --version` (inside the environment) or `py -0p` (Windows), delete the environment folder, and create it again with a newer one: `py -3.12 -m venv ...` on Windows, `python3.12 -m venv ...` on Linux.
@@ -72,6 +71,66 @@ git add CLAUDE.md .claude .cckit && git commit -m "Add cckit"
 **Where things live (0.2.2+).** Everything cckit owns is under `.cckit/`: `cckit.toml` (settings), `key.json` (optional team key), `hooks/` and `scripts/` (the generated Python files), `token_usage.csv` (local log, git-ignored), `manifest.json`. Only what Claude Code itself requires stays in `.claude/` (`settings.json`, `agents/`, `rules/`, `commands/usage.md`) plus `CLAUDE.md`. Upgrading: `cckit init` moves an old `cckit.toml`, the hook scripts, the log and a `team_key` line into place by itself, and keeps what you edited.
 
 Edit `.cckit/cckit.toml`, run `cckit init` again, and only what changed is rewritten.
+
+## Rolling it out to a team
+
+**Admin, once per team.** Deploy the usage app (the team uses the one in `[telemetry]`; `cckit server export-app` writes a deployable copy) and keep its **team key**. Set the model prices on the app's "Models & Cost" page, in USD per million tokens, for every model your developers use (the app works the cost out from the token counts, so a price can be corrected later for past reports too).
+
+**Admin, per repo** (needs cckit installed, see [Install](#install)):
+
+```bash
+cd your-repo
+cckit init                  # writes .cckit/, .claude/ and the CLAUDE.md block; asks for your company e-mail and the team key once
+cckit doctor                # everything should say ok; fix any warning it names
+# private repository only, to register teammates automatically (otherwise skip, or git-ignore the file):
+#   .cckit/key.json  containing  {"key": "THE-TEAM-KEY"}
+git add CLAUDE.md .claude .cckit && git commit -m "Add cckit" && git push
+```
+
+**Developers.** They only `git pull`. cckit does **not** need to be installed for them: the generated files are plain files and the hooks are standalone Python. They need Python 3 on the PATH (set `[hooks] python = "python"` on Windows) and must accept Claude Code's "trust this folder" prompt. At the first session the start-up hook registers them from `git config user.email` when it is a company address and the key is in `.cckit/key.json` (they see one line saying so); otherwise they run `cckit register` or `cckit login`, or set `CCKIT_TEAM_KEY`. Opt out on one machine: `CCKIT_TELEMETRY=off`.
+
+**Check it works:** `cckit whoami --check` (app reachable, who this machine reports as), `/usage` inside Claude Code (local numbers), and the app's dashboard (the first events appear after the first answered prompt).
+
+## Upgrading
+
+Upgrading cckit changes nothing in a repo until someone runs `cckit init` there; the generated files then follow the new version. **Admin steps** (developers only `git pull` afterwards):
+
+```bash
+# 1. which version is the newest?
+git ls-remote --tags --refs --sort=-v:refname https://github.com/rakeshkolipakaTA/claude-c-kit.git | head -3
+
+# 2. upgrade cckit (Linux / macOS; replace v0.2.4 with the newest tag)
+~/.cckit-venv/bin/python -m pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.4"
+cckit --version
+
+# 3. in each repo that uses cckit
+cd your-repo
+cckit init --dry-run        # shows what would change, writes nothing
+cckit init                  # applies it (files you edited yourself are kept and listed; --force overwrites them)
+cckit doctor
+git add CLAUDE.md .claude .cckit && git commit -m "Update cckit to v0.2.4" && git push
+```
+
+```powershell
+# Windows (PowerShell): step 2
+& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.4"
+cckit --version
+```
+
+If pip says `requires a different Python`, see [Troubleshooting](#remove-and-troubleshooting). Pin the same tag for everyone and let **one person** commit the regenerated files, otherwise two people on different versions produce different generated files. To go back, install the older tag the same way and run `cckit init --force`.
+
+| Coming from (rows add up: apply every row that applies to your version) | What happens when you run `cckit init` | What else to know |
+|---|---|---|
+| 0.1.x / 0.2.0 | Nothing special: the files are regenerated. | 0.2.1+ reports one event per turn (not one a minute); the usage app must have the columns `turns`, `duration_s`, `current_model`, `compact_pct` and a higher hourly limit (about 600). |
+| anything before 0.2.2 | `cckit.toml` moves to `.cckit/cckit.toml`; the hook scripts move to `.cckit/hooks/` and `.cckit/scripts/`; the usage log moves to `.cckit/token_usage.csv`; a `team_key = "..."` line moves to `.cckit/key.json` and is removed from the config; the old files are removed (an edited one is kept). | A key that was committed before stays in git history: rotate it. |
+| anything before 0.2.4 | Nothing to do. | The identity file keeps working; from now on it keeps one record per e-mail and each repo reports as its git e-mail, and the GitHub login is no longer taken from the `gh` CLI. Python 3.10 is enough from 0.2.3 on. |
+
+| Version | Main changes |
+|---|---|
+| 0.2.4 | One identity per e-mail; a changed git e-mail registers itself; no GitHub login from `gh`; Python 3.10 supported; install steps for Ubuntu and Windows |
+| 0.2.2 | Everything cckit owns lives in `.cckit/`; the team key in `.cckit/key.json`; the Opus "Model tip" reminder |
+| 0.2.1 | One Stop event per turn, with current model, effort, tools, duration, turns, session minutes and the compaction window in force |
+| 0.2.0 | Stop-hook reporting per model; `cckit login`; `python -m cckit` |
 
 ## What it generates
 
