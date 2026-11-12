@@ -73,11 +73,11 @@ def test_invalid_toml_is_a_clear_error(repo):
 def test_settings_contain_every_requested_control():
     s = render.build_settings(config.defaults())
     env = s["env"]
-    assert s["model"] == "sonnet" and s["effortLevel"] == "medium"
+    assert s["model"] == "sonnet" and s["effortLevel"] == "high"
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "haiku"
     assert env["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] == "4"
     assert env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] == "1"
-    assert env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "50"
+    assert "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" not in env                              # 100 = Claude Code's own default point: nothing written
     assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "200000"
     assert env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] == "1"
     assert env["ENABLE_TOOL_SEARCH"] == "true"
@@ -727,9 +727,18 @@ def test_an_edited_rule_file_is_never_overwritten_and_survives_uninstall(repo):
     assert mine.exists() and read(mine) == "# Our standards\n- Tabs, always.\n"
 
 
-def test_effort_default_is_the_models_own_and_deny_globs_reach_nested_folders(repo):
+def test_defaults_effort_high_and_compaction_at_claude_codes_own_point(repo):
     s = render.build_settings(config.defaults())
-    assert s["effortLevel"] == "medium"
+    assert s["effortLevel"] == "high" and "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" not in s["env"]
+    cfg = config.defaults()
+    cfg["context"]["auto_compact_pct"] = 60
+    assert render.build_settings(cfg)["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "60"          # a lower value is still written
+    cfg["context"]["auto_compact_pct"] = 100
+    assert "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" not in render.build_settings(cfg)["env"]
+
+
+def test_deny_globs_reach_nested_folders(repo):
+    s = render.build_settings(config.defaults())
     deny = s["permissions"]["deny"]
     assert "Read(**/node_modules/**)" in deny and "Read(**/venv/**)" in deny and "Read(dist/**)" in deny and "Read(**/dist/**)" not in deny
     assert 'unless it may have changed' in render.build_claude_md_block(config.defaults())

@@ -23,8 +23,8 @@ DEFAULT_TOML = '''\
 [model]
 default = "sonnet"            # alias (sonnet | haiku | opus | fable) or a full model name. "sonnet" is Sonnet 5.5 on the
                               # Anthropic API; cloud providers map it to their own version, so pin a full name there.
-effort = "medium"             # low | medium | high | xhigh  (settings key effortLevel; developers can still use /effort). medium is the default of Sonnet 5.5, Opus 5.5
-                              # and Haiku 5.5; "high" costs more thinking tokens on every request and is worth it for verification-heavy work
+effort = "high"               # low | medium | high | xhigh  (settings key effortLevel; developers can still use /effort). The default of Sonnet 5.5, Opus 5.5 and
+                              # Haiku 5.5 is medium; "high" thinks more on every request, which costs more and favours accuracy. A committed value applies to every model
 subagent = "haiku"            # model for subagents that do not pick their own (env CLAUDE_CODE_SUBAGENT_MODEL)
 subagent_force = false        # true = every subagent uses the model above, even if its file says otherwise
 block_opus_subagents = true   # deny rule Agent(model:opus): subagents may not be started on Opus
@@ -33,7 +33,8 @@ opus_reminder = true          # while an Opus model is in use, every reply ends 
 
 [context]
 auto_compact_window = 200000  # tokens, 100000..1000000 (env CLAUDE_CODE_AUTO_COMPACT_WINDOW)
-auto_compact_pct = 50         # 1..100: compact when this % of the window is used. It can only LOWER the default.
+auto_compact_pct = 100        # 1..100: compact when this % of the window is used. 100 = Claude Code's own default (compacts shortly before the window is full) and writes no
+                              # setting; a lower value compacts earlier (cheaper requests, but a summary replaces more detail). It can only LOWER the default.
 cap_context_to_200k = true    # env CLAUDE_CODE_DISABLE_1M_CONTEXT=1 (newer models default to a 1M window)
 claude_md_max_lines = 200     # `cckit doctor` fails when CLAUDE.md or a rules file is longer
 

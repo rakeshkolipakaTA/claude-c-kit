@@ -30,7 +30,6 @@ def build_env(cfg: dict) -> dict[str, str]:
     c, t, s, tl, m = cfg["context"], cfg["thinking"], cfg["subagents"], cfg["tools"], cfg["model"]
     env: dict[str, str] = {
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(c["auto_compact_window"]),
-        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": str(c["auto_compact_pct"]),
         "CLAUDE_CODE_SUBAGENT_MODEL": m["subagent"],
         "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": str(s["max_concurrent"]),
         "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": str(s["max_depth"]),
@@ -38,6 +37,8 @@ def build_env(cfg: dict) -> dict[str, str]:
         "BASH_MAX_OUTPUT_LENGTH": str(tl["bash_max_output_chars"]),
         "MAX_MCP_OUTPUT_TOKENS": str(tl["mcp_max_output_tokens"]),
     }
+    if c["auto_compact_pct"] < 100:                       # 100 is Claude Code's own default point: nothing to set
+        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(c["auto_compact_pct"])
     if c["cap_context_to_200k"]:
         env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "1"
     if m["subagent_force"]:

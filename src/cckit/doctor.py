@@ -235,10 +235,11 @@ def run(root: Path, check_claude: bool = True) -> Report:
     t = cfg["thinking"]
     if t["max_tokens"] and not t["fixed_budget"]:
         r.add("warn", "[thinking] max_tokens is ignored: Sonnet 5+, Haiku 5.5 and Opus 4.7+ always use adaptive reasoning. Use [model] effort instead, or set fixed_budget = true for Opus/Sonnet 4.6.")
-    if cfg["context"]["auto_compact_pct"] > 80:
-        r.add("warn", "[context] auto_compact_pct above 80 saves little; 50 to 70 keeps long sessions cheaper")
+    if cfg["context"]["auto_compact_pct"] < 100:
+        r.add("info", f"auto_compact_pct is {cfg['context']['auto_compact_pct']}: compaction starts at {cfg['context']['auto_compact_pct']}% of the {cfg['context']['auto_compact_window']:,}-token window "
+                      "(cheaper requests, but a summary replaces more detail sooner). 100 is Claude Code's own default.")
     if cfg["model"]["effort"] in ("high", "xhigh"):
-        r.add("info", f"effort is '{cfg['model']['effort']}': more thinking tokens on every request than the default of Sonnet 5.5, Opus 5.5 and Haiku 5.5 (medium). Keep it for verification-heavy work; developers can change it per task with /effort.")
+        r.add("info", f"effort is '{cfg['model']['effort']}': thinks more on every request than the default of Sonnet 5.5, Opus 5.5 and Haiku 5.5 (medium), which costs more and favours accuracy. Developers can change it per task with /effort.")
     if cfg["model"]["default"] in config.MODEL_ALIASES:
         r.add("info", f"model '{cfg['model']['default']}' is an alias: its version depends on how your developers connect (Anthropic API vs a cloud provider). Pin a full name if they differ.")
     if cfg["tools"]["tool_search"] == "false":
