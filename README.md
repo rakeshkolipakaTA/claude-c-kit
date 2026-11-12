@@ -3,7 +3,7 @@
 A small Python package that writes **cost-saving Claude Code configuration into a repo**, so every developer who opens
 the repo gets the same cheap, safe defaults without setting anything up by hand.
 
-**Who does what.** The **team lead** installs cckit once, sets a repo up, and commits the result. **Everyone else just runs `git pull`**: they do not install or run anything. Upgrading and uninstalling are the lead's job too.
+**Who does what.** The **team lead** installs cckit once, sets a repo up, and commits the result. **Everyone else just runs `git pull`**: they do not install or run anything. Upgrading and uninstalling are the lead's job too. All commands are listed in [Commands](#commands).
 
 ## Quick start (team lead)
 
@@ -31,6 +31,64 @@ cckit init
 git add CLAUDE.md .claude .cckit && git commit -m "Add cckit" && git push
 ```
 `cckit init` asks for your company e-mail (press Enter to accept the suggestion) and, the first time, the team key.
+
+## Commands
+
+Every command takes an optional `[path]` (the repo root; default: the current folder). `cckit <command> --help` shows the options.
+
+**Set up a repo (team lead)**
+
+| Command | What it does |
+|---|---|
+| `cckit init` (same as `cckit install`) | creates or updates `.cckit/cckit.toml`, settings, `CLAUDE.md` block, rules, subagents, hooks. Safe to re-run; files you edited are kept. `--dry-run` shows the changes, `--force` replaces values you changed |
+| `cckit doctor` | checks the repo against `.cckit/cckit.toml` and says what to fix; exit code 1 on failures. `--no-claude` skips the `claude --version` call |
+| `cckit print-settings` | prints the `settings.json` content cckit manages |
+
+**Take it out, switch it off, start fresh (team lead)**
+
+| Command | What it does |
+|---|---|
+| `cckit disable` | switches cckit off for the repo: removes what it generated (hooks, rules, `CLAUDE.md` block), keeps `.cckit/cckit.toml` and the key, sets `[cckit] enabled = false` |
+| `cckit enable` | switches it on again (`enabled = true`, then `init`) |
+| `cckit uninstall` | removes everything cckit added (lists it, asks first). Keeps your settings, key and usage log unless `--purge`. `--force` also removes generated files you edited, `--yes` skips the question, `--dry-run` only lists |
+| `cckit reinstall` | uninstall, then init, for a repo where something broke. Same options as `uninstall` |
+
+**Identity and usage reporting**
+
+| Command | What it does |
+|---|---|
+| `cckit login` | saves your company e-mail and the token you were given in your home folder (`~/.config/cckit/identity.json`), then runs `init`. `--email`, `--token` (or `CCKIT_TOKEN`), `--no-init` |
+| `cckit register` | registers this machine for usage reports with the e-mail and the team key. `--email`, `--github`, `--endpoint`, `--team-key` (or `CCKIT_TEAM_KEY`, or `.cckit/key.json`) |
+| `cckit whoami` | shows the telemetry setting and who this machine is registered as. `--check` also pings the app |
+| `cckit report` | token usage from your local Claude Code sessions. `--days N` (default 7), `--project TEXT`, `--top N`, `--json`, `--dir` |
+
+**Run Claude Code**
+
+| Command | What it does |
+|---|---|
+| `cckit run` | starts Claude Code with only the MCP servers a task needs: `--profile NAME` (`none` = no MCP servers), `--model`, `--effort`, `--dry-run`, and anything after `--` goes to `claude` |
+
+**The usage app (whoever hosts it)**
+
+| Command | What it does |
+|---|---|
+| `cckit server export-app --out DIR` | writes the deployable app: `usage_api.py`, Dockerfile, README, `DASHBOARD.md`. `--check` tells you whether an exported copy is out of date |
+| `cckit server run` | runs the app: `--host`, `--port`, `--db`, `--domains` |
+| `cckit server keys` / `users` / `dump` | prints a fresh team key and admin token, lists registered developers, or writes a table as CSV (`--table events\|users`) |
+| `cckit server deactivate EMAIL` / `activate EMAIL` / `reset EMAIL` | switches a user off or on, or clears their tokens |
+
+The same server commands work on the exported `usage_api.py`.
+
+**Environment switches (one machine, nothing to commit)**
+
+| Variable | Effect |
+|---|---|
+| `CCKIT_DISABLED=1` | every cckit hook does nothing |
+| `CCKIT_TELEMETRY=off` | nothing is registered or sent to the team app |
+| `CCKIT_USAGE_LOG=off` | the local usage CSV is not written |
+| `CCKIT_OPUS_REMINDER=off` | no "Model tip" line while on Opus |
+| `CCKIT_TEAM_KEY`, `CCKIT_TOKEN`, `CCKIT_EMAIL`, `CCKIT_GITHUB` | give the team key, token, e-mail or GitHub login without a file or prompt |
+| `CCKIT_IDENTITY_FILE` | use another identity file (to pin a repo to one identity, put it in `.claude/settings.local.json` `env`) |
 
 ## Everyone else
 
@@ -176,25 +234,6 @@ to a small app you deploy yourself (it must be reachable without a login, becaus
 * **Per-person spend limits and billing**: set in the admin console (Teams/Enterprise or Console workspaces) or in your cloud provider.
 * **Force settings on developers**: a developer's own `settings.local.json` or `/model` choice can override repo settings. Only managed settings are enforced.
 * **Trust**: Claude Code ignores a project's `permissions.allow` rules and most `env` values until the developer trusts the folder.
-
-## Commands
-
-```
-cckit init [path] [--dry-run] [--force]    create/update files; --force replaces values you changed (`cckit install` is the same)
-cckit uninstall [path] [--purge] [--dry-run] [--yes] [--force]   take cckit out of the repo again (see Uninstall or start fresh)
-cckit reinstall [path] [--purge] [--yes]   a fresh install: uninstall, then init
-cckit disable [path] [--yes] [--dry-run]   switch cckit off for the repo (removes what it generated, keeps .cckit/cckit.toml and the key)
-cckit enable [path]                        switch it on again (sets [cckit] enabled = true, runs init)
-cckit doctor [path]                        verify the repo; exit code 1 on failures
-cckit print-settings [path]                show the settings.json content cckit manages
-cckit login [--email E] [--token T]         save the e-mail and token you were given (home folder), then run init here
-cckit register [--email E] [--github G]    register this machine for usage reports (see [telemetry])
-cckit server export-app [--out DIR]        write the deployable usage app
-cckit server run | keys | users | deactivate|activate|reset EMAIL | dump   run and administer the usage app
-cckit whoami [--check]                     show the telemetry setting and registered user; --check pings the endpoint
-cckit report [--days N] [--project TEXT] [--json]
-cckit run [--profile NAME] [--effort E] [--model M] [-- claude args]
-```
 
 ## Safe by design
 

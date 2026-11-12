@@ -485,7 +485,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("register", help="register this machine's GitHub user name for compaction reports")
     common(p)
     p.add_argument("--email", help="your company e-mail (default: `git config user.email` when it is on an allowed domain, else asked)")
-    p.add_argument("--github", help="your GitHub login, optional (default: found from git or gh when possible)")
+    p.add_argument("--github", help="your GitHub login, optional (default: found from git when possible)")
     p.add_argument("--endpoint", help="usage endpoint (default: [telemetry] endpoint)")
     p.add_argument("--team-key", help=f"team key (default: $CCKIT_TEAM_KEY, else {config.KEY_NAME})")
     p.set_defaults(fn=cmd_register)
