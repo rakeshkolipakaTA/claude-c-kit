@@ -269,6 +269,22 @@ def upsert_block(existing: str | None, block: str) -> str:
     return existing + sep + block
 
 
+def remove_block(existing: str) -> str | None:
+    """CLAUDE.md without the managed block; None when nothing else is left (the file was only ours). Everything outside the markers is kept."""
+    b = existing.find("<!-- cckit:begin")
+    e = existing.find(MARK_END)
+    if b == -1 and e == -1:
+        return existing
+    if (b == -1) != (e == -1) or e < b:
+        raise ValueError("CLAUDE.md has a cckit marker without its partner (<!-- cckit:begin ... --> and <!-- cckit:end -->). "
+                         "Remove it by hand; nothing was changed.")
+    before, after = existing[:b], existing[e + len(MARK_END):].lstrip("\n")
+    if not before.strip() and not after.strip():
+        return None
+    head = before.rstrip("\n") + "\n" if before.strip() else ""
+    return head + ("\n" + after if head and after.strip() else after)
+
+
 # ----------------------------------------------------------------------------- rules and subagents
 def build_rules(cfg: dict) -> dict[str, str]:
     testing = """\

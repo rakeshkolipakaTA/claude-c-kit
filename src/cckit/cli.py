@@ -1,4 +1,4 @@
-"""Command line: cckit init | login | register | whoami | server | doctor | report | run | print-settings."""
+"""Command line: cckit init (install) | uninstall | reinstall | login | register | whoami | server | doctor | report | run | print-settings."""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import __version__, apply, config, doctor, identity, render, report, server
+from . import __version__, apply, config, doctor, identity, render, report, server, uninstall
 
 
 def _root(args) -> Path:
@@ -133,6 +133,48 @@ def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None,
     print(f"Registered {res.get('email', email)}" + (f" (GitHub: {res['github']})" if res.get("github") else "") +
           f". Token saved to {identity.identity_path()} (keep it private, never commit it). Check any time with `cckit whoami`.")
     return 0
+
+
+def cmd_uninstall(args) -> int:
+    """Take cckit out of the repo: show exactly what goes, ask, then remove it."""
+    root = _root(args)
+    try:
+        res = uninstall.uninstall(root, purge=args.purge, force=args.force, dry_run=True)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    doing = [ln for ln in res.lines if ln.split()[0] in ("removed", "merged")]
+    print("\n".join(res.lines) if res.lines else "Nothing of cckit's found here.")
+    if args.dry_run:
+        print("\nDry run: nothing was removed.")
+        return 0
+    if not doing:
+        print("\nNothing to remove.")
+        return 0
+    if not args.yes:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            print("\nerror: not removing without a terminal to confirm; pass --yes.", file=sys.stderr)
+            return 2
+        try:
+            if input("\nRemove these from this repo? [y = yes, Enter = no]: ").strip().lower() not in ("y", "yes"):
+                print("Cancelled; nothing was removed.")
+                return 0
+        except (KeyboardInterrupt, EOFError):
+            print("\nCancelled; nothing was removed.")
+            return 130
+    uninstall.uninstall(root, purge=args.purge, force=args.force, dry_run=False)
+    print("\nRemoved. This machine's registration is kept (~/.config/cckit/identity.json). To install again here: `cckit install`.")
+    return 0
+
+
+def cmd_reinstall(args) -> int:
+    """A fresh install: uninstall (keeping your settings and key unless --purge; generated files you edited are replaced, and the plan says which), then init."""
+    args.force = True
+    rc = cmd_uninstall(args)
+    if rc != 0 or args.dry_run:
+        return rc
+    print("\nInstalling again...\n")
+    return cmd_init(argparse.Namespace(path=args.path, force=False, dry_run=False))
 
 
 TOKEN_RX = re.compile(r"[A-Za-z0-9_\-]{8,128}")
@@ -357,6 +399,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force", action="store_true", help="overwrite files and values you changed")
     p.add_argument("--dry-run", action="store_true", help="show what would change, write nothing")
     p.set_defaults(fn=cmd_init)
+
+    p = sub.add_parser("install", help="the same as init (create or update everything cckit manages in this repo)")
+    common(p)
+    p.add_argument("--force", action="store_true", help="overwrite files and values you changed")
+    p.add_argument("--dry-run", action="store_true", help="show what would change, write nothing")
+    p.set_defaults(fn=cmd_init)
+
+    def removal(p):
+        common(p)
+        p.add_argument("--purge", action="store_true", help="also remove your settings (.cckit/cckit.toml), the team key (.cckit/key.json) and the local usage log")
+        p.add_argument("--force", action="store_true", help="remove generated files and settings you edited too")
+        p.add_argument("--dry-run", action="store_true", help="show what would be removed, remove nothing")
+        p.add_argument("--yes", "-y", action="store_true", help="do not ask for confirmation")
+
+    p = sub.add_parser("uninstall", help="take cckit out of this repo again (its files, hooks, CLAUDE.md block and .gitignore block); your own text is kept")
+    removal(p)
+    p.set_defaults(fn=cmd_uninstall)
+
+    p = sub.add_parser("reinstall", help="a fresh install: uninstall, then init. Keeps your settings and key unless --purge; generated files you edited are replaced (the plan lists them)")
+    removal(p)
+    p.set_defaults(fn=cmd_reinstall)
 
     p = sub.add_parser("doctor", help="check the repo against .cckit/cckit.toml")
     common(p)

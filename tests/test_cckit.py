@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from cckit import apply, cli, config, doctor, render, report
+from cckit import apply, cli, config, doctor, identity, render, report
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -527,3 +527,132 @@ def test_reminder_survives_garbage_and_keeps_users_own_prompt_hooks(repo):
     assert len(entries) == 2 and any("echo mine" in json.dumps(e) for e in entries)
     p = subprocess.run([sys.executable, str(repo / ".cckit/hooks/opus_reminder.py")], input="not json", capture_output=True, text=True, timeout=30)
     assert p.returncode == 0 and p.stdout == "" and p.stderr == ""
+
+
+# ------------------------------------------------------------------ uninstall / install / reinstall
+def tree(root):
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(Path(root).rglob("*")) if p.is_file() and ".git" not in p.parts}
+
+
+USER_SETTINGS = {"permissions": {"allow": ["Bash(make test)"], "deny": ["Read(secrets/**)"]}, "model": "opus", "env": {"MINE": "1"},
+                 "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}}
+
+
+def lived_in(repo):
+    """A repo that already had its own CLAUDE.md, .gitignore and settings (CRLF line endings in the markdown on purpose)."""
+    (repo / "CLAUDE.md").write_bytes(b"# Our project\r\nWe use tabs.\r\n")
+    (repo / ".gitignore").write_text("dist/\n*.log\n")
+    (repo / ".claude").mkdir()
+    (repo / ".claude/settings.json").write_text(json.dumps(USER_SETTINGS, indent=2) + "\n")
+    return tree(repo)
+
+
+def test_uninstall_gives_back_exactly_what_the_repo_had(repo):
+    before = lived_in(repo)
+    apply.init(repo)
+    assert tree(repo) != before
+    assert cli.main(["uninstall", str(repo), "--yes"]) == 0
+    after = tree(repo)
+    for k, v in before.items():
+        assert after[k] == v, k                                                       # CLAUDE.md (CRLF too), .gitignore and settings.json: byte for byte
+    assert set(after) - set(before) == {".cckit/cckit.toml"}                         # only your own config is left behind
+    assert not (repo / ".cckit/hooks").exists() and not (repo / ".claude/agents").exists() and not (repo / ".claude/commands").exists()
+
+
+def test_uninstall_purge_removes_the_config_key_and_log_and_what_cckit_created(repo):
+    apply.init(repo)                                                                  # a bare repo: cckit created CLAUDE.md, .gitignore and settings.json itself
+    (repo / ".cckit/key.json").write_text('{"key": "abcd1234"}')
+    (repo / ".cckit/token_usage.csv").write_text("timestamp\n")
+    (repo / ".cckit/token_usage.csv.state.json").write_text("{}")
+    assert cli.main(["uninstall", str(repo), "--purge", "--yes"]) == 0
+    assert tree(repo) == {} and not (repo / ".cckit").exists() and not (repo / ".claude").exists()
+
+
+def test_uninstall_without_purge_keeps_settings_key_and_log_and_init_restores_the_setup(repo):
+    apply.init(repo)
+    (repo / ".cckit/cckit.toml").write_text(read(repo / ".cckit/cckit.toml").replace("tail_lines = 100", "tail_lines = 33"))
+    (repo / ".cckit/key.json").write_text('{"key": "abcd1234"}')
+    (repo / ".cckit/token_usage.csv").write_text("timestamp\n1\n")
+    first = tree(repo)
+    cli.main(["uninstall", str(repo), "--yes"])
+    left = tree(repo)
+    assert set(left) == {".cckit/cckit.toml", ".cckit/key.json", ".cckit/token_usage.csv"}
+    apply.init(repo)
+    again = tree(repo)
+    assert set(again) == set(first) and "tail_lines = 33" in again[".cckit/cckit.toml"].decode()
+    assert again[".cckit/key.json"] == first[".cckit/key.json"] and again[".claude/settings.json"] == first[".claude/settings.json"]
+
+
+def test_uninstall_keeps_a_file_you_edited_unless_forced(repo):
+    apply.init(repo)
+    mine = repo / ".claude/agents/explorer.md"
+    mine.write_text(read(mine) + "\nMy own rule.\n")
+    cli.main(["uninstall", str(repo), "--yes"])
+    assert mine.exists() and "My own rule." in read(mine) and not (repo / ".claude/agents/reviewer.md").exists()
+    cli.main(["uninstall", str(repo), "--yes", "--force"])
+    assert not mine.exists()
+
+
+def test_uninstall_dry_run_and_a_missing_confirmation_change_nothing(repo, monkeypatch, capsys):
+    before = lived_in(repo)
+    apply.init(repo)
+    snap = tree(repo)
+    assert cli.main(["uninstall", str(repo), "--dry-run"]) == 0 and tree(repo) == snap
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert cli.main(["uninstall", str(repo)]) == 2 and tree(repo) == snap              # no terminal and no --yes: refuses
+    assert "--yes" in capsys.readouterr().err
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda p="": "")                             # Enter = no
+    assert cli.main(["uninstall", str(repo)]) == 0 and tree(repo) == snap
+    monkeypatch.setattr("builtins.input", lambda p="": "y")
+    assert cli.main(["uninstall", str(repo)]) == 0 and tree(repo) != snap and before["CLAUDE.md"] == tree(repo)["CLAUDE.md"]
+
+
+def test_uninstall_without_a_manifest_removes_only_unedited_generated_files(repo):
+    apply.init(repo)
+    (repo / ".cckit/manifest.json").unlink()
+    mine = repo / ".claude/rules/testing.md"
+    mine.write_text("my rules\n")
+    cli.main(["uninstall", str(repo), "--yes"])
+    assert mine.exists() and not (repo / ".cckit/hooks/log_token_usage.py").exists() and not (repo / ".claude/agents/explorer.md").exists()
+    assert "hooks" not in json.loads(read(repo / ".claude/settings.json")) if (repo / ".claude/settings.json").exists() else True
+
+
+def test_uninstall_refuses_a_lone_marker_and_changes_nothing(repo, capsys):
+    apply.init(repo)
+    (repo / "CLAUDE.md").write_text("# Mine\n<!-- cckit:begin -->\nno end marker\n")
+    snap = tree(repo)
+    assert cli.main(["uninstall", str(repo), "--yes"]) == 2 and tree(repo) == snap
+    assert "marker" in capsys.readouterr().err
+
+
+def test_uninstall_on_a_repo_without_cckit_is_harmless(repo, capsys):
+    (repo / "CLAUDE.md").write_text("# Mine\n")
+    assert cli.main(["uninstall", str(repo), "--yes"]) == 0 and tree(repo) == {"CLAUDE.md": b"# Mine\n"}
+    assert "Nothing" in capsys.readouterr().out
+
+
+def test_reinstall_regenerates_what_was_broken_and_keeps_your_settings(repo, monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    apply.init(repo)
+    (repo / ".cckit/cckit.toml").write_text(read(repo / ".cckit/cckit.toml").replace("tail_lines = 100", "tail_lines = 44"))
+    apply.init(repo)
+    hook = repo / ".cckit/hooks/trim_output.py"
+    hook.write_text("broken\n")
+    (repo / ".claude/agents/reviewer.md").unlink()
+    assert cli.main(["reinstall", str(repo), "--yes"]) == 0
+    assert "broken" not in read(hook) and "44" in read(hook) and (repo / ".claude/agents/reviewer.md").exists()   # a fresh copy, from the kept config
+    assert "tail_lines = 44" in read(repo / ".cckit/cckit.toml")
+    assert cli.main(["doctor", str(repo), "--no-claude"]) == 0
+
+
+def test_install_is_init(repo):
+    assert cli.main(["install", str(repo)]) == 0 and (repo / ".cckit/cckit.toml").exists() and (repo / ".claude/settings.json").exists()
+
+
+def test_uninstall_leaves_this_machines_registration_alone(repo):
+    identity.save_identity("https://e/api/usage", "ada.lovelace@tigeranalytics.com", "", "tok-ada")
+    apply.init(repo)
+    cli.main(["uninstall", str(repo), "--purge", "--yes"])
+    assert identity.get_identity("https://e/api/usage")["token"] == "tok-ada"

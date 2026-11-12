@@ -61,7 +61,7 @@ git add CLAUDE.md .claude .cckit && git commit -m "Add cckit"
 ### Remove and troubleshooting
 
 - **Upgrade:** see [Upgrading](#upgrading) below.
-- **Remove cckit itself:** delete the environment folder (`rm -rf ~/.cckit-venv`, or `Remove-Item -Recurse $env:USERPROFILE\.cckit-venv`). Repos keep working: the files cckit generated are plain files and do not need cckit.
+- **Remove cckit itself, or start over:** see [Uninstall and reinstall](#uninstall-and-reinstall).
 - **`cckit` is "not found":** run it through Python instead, which is the same program: `~/.cckit-venv/bin/python -m cckit init` (Windows: `& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m cckit init`).
 - **`requires a different Python` (for example `3.9.x not in '>=3.10'`):** the environment was created with an old Python. Check with `python --version` (inside the environment) or `py -0p` (Windows), delete the environment folder, and create it again with a newer one: `py -3.12 -m venv ...` on Windows, `python3.12 -m venv ...` on Linux.
 - **`pip install` fails with a git error:** git is missing or not on the PATH (`git --version`), or there is no network access to github.com.
@@ -132,6 +132,53 @@ If pip says `requires a different Python`, see [Troubleshooting](#remove-and-tro
 | 0.2.2 | Everything cckit owns lives in `.cckit/`; the team key in `.cckit/key.json`; the Opus "Model tip" reminder |
 | 0.2.1 | One Stop event per turn, with current model, effort, tools, duration, turns, session minutes and the compaction window in force |
 | 0.2.0 | Stop-hook reporting per model; `cckit login`; `python -m cckit` |
+
+## Uninstall and reinstall
+
+There are two separate things to remove: cckit **in a repo** (its files and settings) and cckit **on a machine** (the program).
+
+### In a repo: `cckit uninstall`
+
+```bash
+cd your-repo
+cckit uninstall --dry-run   # lists exactly what would go; removes nothing
+cckit uninstall             # shows the same list, asks for confirmation (Enter = no), then removes it  (--yes skips the question)
+git add -A && git commit -m "Remove cckit" && git push
+```
+
+It removes only what cckit put there: the generated hooks, scripts, subagents, rules, MCP profiles and the `/usage` command; the `CLAUDE.md` block and the `.gitignore` block (your own text is kept, line endings included, and a file that held only our block is deleted); and the model, permission rules and hooks cckit added to `.claude/settings.json` (your own keys stay). A generated file **you edited** is kept and listed, unless you add `--force`. If a hand-edited file or a stray `<!-- cckit:begin -->` marker would make it guess, it stops and changes nothing.
+
+**Kept by default** (they are yours, and a later `cckit install` uses them again): `.cckit/cckit.toml`, `.cckit/key.json` and the local usage log `.cckit/token_usage.csv`. Add `--purge` to remove those too, which leaves no trace of cckit in the repo. **This machine's registration** (`~/.config/cckit/identity.json`) is never touched, because registering again would use one of the five device slots each e-mail has; delete that file by hand only if you really want to forget it. Teammates need do nothing except `git pull`: the hooks are gone with the files.
+
+### In a repo: install again, or start fresh
+
+```bash
+cckit install               # the same as `cckit init`: creates everything again from .cckit/cckit.toml
+cckit reinstall             # uninstall + install in one step: for a repo where something got broken or edited by hand
+cckit reinstall --purge     # a completely fresh start: also resets .cckit/cckit.toml (and removes the key and the log)
+```
+
+`reinstall` replaces generated files even if you edited them (the list it shows first says which), and keeps your settings and key unless you add `--purge`. It asks before it changes anything.
+
+### On a machine: remove or reinstall the program
+
+Repos keep working without cckit installed, so this never breaks a project. Linux / macOS:
+
+```bash
+rm -rf ~/.cckit-venv ~/.local/bin/cckit              # the program (and the link made in the install steps)
+rm -f ~/.config/cckit/identity.json                   # optional: forget who this machine is registered as
+# fresh install: repeat the Ubuntu install steps above
+```
+
+Windows (PowerShell):
+
+```powershell
+Remove-Item -Recurse -Force "$env:USERPROFILE\.cckit-venv"          # the program
+Remove-Item -Force "$env:APPDATA\cckit\identity.json"              # optional: forget who this machine is registered as
+# fresh install: repeat the Windows install steps above (and remove the \.cckit-venv\Scripts entry from your PATH if you added one)
+```
+
+If you only want a new version, upgrading is enough; see [Upgrading](#upgrading).
 
 ## What it generates
 
@@ -231,7 +278,9 @@ to a small app you deploy yourself (it must be reachable without a login, becaus
 ## Commands
 
 ```
-cckit init [path] [--dry-run] [--force]    create/update files; --force replaces values you changed
+cckit init [path] [--dry-run] [--force]    create/update files; --force replaces values you changed (`cckit install` is the same)
+cckit uninstall [path] [--purge] [--dry-run] [--yes] [--force]   take cckit out of the repo again (see Uninstall and reinstall)
+cckit reinstall [path] [--purge] [--yes]   a fresh install: uninstall, then init
 cckit doctor [path]                        verify the repo; exit code 1 on failures
 cckit print-settings [path]                show the settings.json content cckit manages
 cckit login [--email E] [--token T]         save the e-mail and token you were given (home folder), then run init here
