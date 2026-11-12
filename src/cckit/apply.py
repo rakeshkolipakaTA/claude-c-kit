@@ -243,6 +243,8 @@ def init(root: Path, force: bool = False, dry_run: bool = False) -> Result:
     errors = config.validate(cfg)
     if errors:
         raise ValueError(".cckit/cckit.toml has problems:\n  - " + "\n  - ".join(errors))
+    if not cfg["cckit"]["enabled"]:
+        raise ValueError("cckit is switched off for this repo ([cckit] enabled = false in .cckit/cckit.toml). Run `cckit enable` to switch it on again.")
 
     # Preflight: everything that can make init refuse is checked BEFORE the first file is written, so a refusal changes nothing at all.
     cm = claude_md_path(root)

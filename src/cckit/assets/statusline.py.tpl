@@ -5,6 +5,7 @@ Claude Code runs this script and sends session data as JSON on stdin; whatever w
 bottom of the screen. Every field is optional, so a missing one never breaks the line.
 """
 import json
+import os
 import sys
 
 WARN_PCT = __WARN_PCT__
@@ -19,6 +20,8 @@ def get(d, *path, default=None):
 
 
 def main() -> None:
+    if os.environ.get("CCKIT_DISABLED", "").lower() in ("1", "true", "yes", "on"):
+        return
     try:
         data = json.load(sys.stdin)
     except Exception:

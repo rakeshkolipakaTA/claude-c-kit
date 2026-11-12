@@ -520,7 +520,7 @@ def test_end_to_end_register_then_report(server, tmp_path):
     assert (r["Requests"], r["Subagent Requests"], r["Subagent Output"], r["Tool Calls"]) == (2, 2, 25, 4)
     assert r["Models"] == "claude-sonnet-5-5:2;claude-haiku-5-5:2" and "Bash:2" in r["Tools"]
     assert (r["Session Minutes"], r["Compactions Before"], r["Project"], r["Branch"], r["Session"]) == (26, 1, "myproject", "feature/x", "sess-1")
-    assert r["OS"] and r["Client"] == "cckit-hook/3"
+    assert r["OS"] and r["Client"] == "cckit-hook/5"
     whole = json.dumps(dump(server))
     for secret in ("SECRET", "do not leak", str(tmp_path), "/etc/passwd"):
         assert secret not in whole
@@ -1019,7 +1019,7 @@ def test_dump_command_writes_csv(tmp_path, monkeypatch, capsys):
 def test_export_app_writes_a_deployable_folder_and_check_notices_drift(tmp_path, capsys):
     out = tmp_path / "usage-api"
     assert cli.main(["server", "export-app", "--out", str(out)]) == 0
-    assert sorted(p.name for p in out.iterdir()) == [".dockerignore", ".env.example", ".gitignore", "Dockerfile", "README.md", "usage_api.py"]
+    assert sorted(p.name for p in out.iterdir()) == [".dockerignore", ".env.example", ".gitignore", "DASHBOARD.md", "Dockerfile", "README.md", "usage_api.py"]
     assert cli.main(["server", "export-app", "--check", "--out", str(out)]) == 0
     (out / "usage_api.py").write_text("# edited\n")
     assert cli.main(["server", "export-app", "--check", "--out", str(out)]) == 1
@@ -1456,7 +1456,7 @@ def test_stop_hook_posts_per_model_totals_once(server, tmp_path):
     assert set(ev) == {"claude-sonnet-5-5", "claude-haiku-5-5"}                       # one event per model, so each is priced with its own rates
     s = ev["claude-sonnet-5-5"]
     assert (s["Input Tokens"], s["Output Tokens"], s["Cache Read"], s["Cache Write"], s["Requests"]) == (15, 100, 400, 20, 2)   # the final count of m1 (60), not both lines
-    assert (s["Context Tokens"], s["Session"], s["Project"], s["Client"], s["Email"]) == (305, "sess-1", tmp_path.name, "cckit-stop/2", ADA)
+    assert (s["Context Tokens"], s["Session"], s["Project"], s["Client"], s["Email"]) == (305, "sess-1", tmp_path.name, "cckit-stop/4", ADA)
     h = ev["claude-haiku-5-5"]
     assert (h["Input Tokens"], h["Output Tokens"], h["Requests"], h["Subagent Requests"], h["Subagent Output"]) == (1, 7, 0, 1, 7)
     assert rows(server, "Claude_Users")[0]["Compactions"] == 0                         # Stop events are not compactions
@@ -1768,3 +1768,115 @@ def test_whoami_and_doctor_name_a_mismatch(server, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "mismatch" in out and GRACE in out and ADA in out
     assert GRACE in doctor.run(tmp_path, check_claude=False).render() and "git e-mail" in doctor.run(tmp_path, check_claude=False).render()
+
+
+# ------------------------------------------------------------------ billing (subscription vs metered) and the off switch
+def claude_login(tmp_path, plan="team"):
+    d = tmp_path / "claude-home"
+    d.mkdir(exist_ok=True)
+    (d / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "SECRET-ACCESS", "refreshToken": "SECRET-REFRESH", "subscriptionType": plan,
+                                                                        "rateLimitTier": "default_raven"}}))
+    (d / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "secret.person@example.com", "accountUuid": "SECRET-UUID", "organizationUuid": "SECRET-ORG-UUID",
+                                                                 "fullName": "Secret Person", "organizationName": "Claude-Cluster3", "organizationType": "claude_team",
+                                                                 "seatTier": "team_standard", "billingType": "stripe_subscription", "hasExtraUsageEnabled": False}}))
+    return {"CLAUDE_CONFIG_DIR": str(d)}
+
+
+def one_turn(tmp_path):
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(msg_line("m1", inp=10, out=50, cr=100, cw=20) + "\n")
+    return tr
+
+
+def billing_of(server):
+    return [(r["Billing"], r["Plan"]) for r in stop_events(server)]
+
+
+def test_a_claude_login_is_reported_as_subscription_with_its_plan_only(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    stop_hook(tmp_path, one_turn(tmp_path), extra_env=claude_login(tmp_path, "Team"))
+    assert billing_of(server) == [("subscription", "team")]
+    ev = stop_events(server)[0]
+    assert (ev["Org"], ev["Org Type"], ev["Seat Tier"], ev["Billing Type"], ev["Extra Usage"], ev["Rate Limit Tier"]) == \
+        ("Claude-Cluster3", "claude_team", "team_standard", "stripe_subscription", "no", "default_raven")
+    whole = json.dumps(dump(server)) + (tmp_path / ".cckit/token_usage.csv.state.json").read_text()
+    for secret in ("SECRET", "secret.person", "Secret Person"):
+        assert secret not in whole                                                    # the plan fields only: no e-mail, name, ids or tokens of the login
+
+
+def test_extra_usage_on_is_reported(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    env = claude_login(tmp_path, "team")
+    cj = Path(env["CLAUDE_CONFIG_DIR"]) / ".claude.json"
+    d = json.loads(cj.read_text())
+    d["oauthAccount"]["hasExtraUsageEnabled"] = True
+    cj.write_text(json.dumps(d))
+    stop_hook(tmp_path, one_turn(tmp_path), extra_env=env)
+    ev = stop_events(server)[0]
+    assert (ev["Billing"], ev["Extra Usage"]) == ("subscription", "yes")
+
+
+def test_a_provider_or_key_does_not_send_the_logins_organisation(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    stop_hook(tmp_path, one_turn(tmp_path), extra_env={**claude_login(tmp_path), "CLAUDE_CODE_USE_BEDROCK": "1"})
+    ev = stop_events(server)[0]
+    assert (ev["Billing"], ev["Plan"], ev["Org"], ev["Seat Tier"], ev["Extra Usage"]) == ("metered", "bedrock", "", "", "")
+
+
+def test_an_api_key_or_a_cloud_provider_is_metered(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    for i, (env, plan) in enumerate((({"ANTHROPIC_API_KEY": "sk-x"}, "api"), ({"CLAUDE_CODE_USE_BEDROCK": "1"}, "bedrock"),
+                                     ({"CLAUDE_CODE_USE_VERTEX": "true"}, "vertex"), ({"CLAUDE_CODE_USE_FOUNDRY": "1", **claude_login(tmp_path)}, "foundry"))):
+        tr = tmp_path / f"t{i}.jsonl"
+        tr.write_text(msg_line(f"x{i}", inp=1, out=1, cr=0, cw=0) + "\n")
+        stop_hook(tmp_path, tr, extra_env=env)
+    assert billing_of(server) == [("metered", "api"), ("metered", "bedrock"), ("metered", "vertex"), ("metered", "foundry")]      # a provider beats a login
+
+
+def test_unknown_billing_when_there_is_no_login_to_read(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    empty = tmp_path / "nologin"
+    empty.mkdir()
+    git_dir = os.path.dirname(shutil.which("git"))
+    stop_hook(tmp_path, one_turn(tmp_path), extra_env={"CLAUDE_CONFIG_DIR": str(empty), "PATH": git_dir})
+    assert billing_of(server) == [("unknown", "")]
+
+
+def test_the_repo_can_force_billing_for_everyone(server, tmp_path):
+    setup(server, tmp_path, extra='[usage]\nbilling = "metered"\n')
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    stop_hook(tmp_path, one_turn(tmp_path), extra_env=claude_login(tmp_path, "max"))
+    assert billing_of(server) == [("metered", "max")]                    # forced value; the plan is still what the login says
+
+
+def test_compaction_events_carry_billing_too(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    run_hook(tmp_path, rich_transcript(tmp_path / "t.jsonl"), extra_env=claude_login(tmp_path, "pro"))
+    assert [(r["Billing"], r["Plan"]) for r in rows(server, "Claude_Compactions")] == [("subscription", "pro")]
+
+
+def test_billing_validation_and_the_server_cleans_the_value(server, tmp_path):
+    assert config.validate({**config.defaults(), "usage": {**config.defaults()["usage"], "billing": "free"}}) == ['[usage] billing must be "auto", "metered" or "subscription"']
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    tok = identity.get_identity(server + "/exec")["token"]
+    out = APIS[server].usage({"email": ADA, "token": tok, "event_id": "e-bill", "trigger": "stop", "billing": "<b>FREE</b>", "plan": "Weird Plan!!"})
+    assert out["ok"]
+    assert [(r["Billing"], r["Plan"]) for r in stop_events(server)] == [("unknown", "weird plan!!")]
+
+
+def test_cckit_disabled_makes_every_hook_do_nothing(server, tmp_path):
+    setup(server, tmp_path)
+    cli.main(["register", str(tmp_path), "--email", ADA])
+    stop_hook(tmp_path, one_turn(tmp_path), extra_env={"CCKIT_DISABLED": "1"})
+    assert stop_events(server) == [] and not (tmp_path / ".cckit/token_usage.csv").exists()
+    run_hook(tmp_path, rich_transcript(tmp_path / "r.jsonl"), extra_env={"CCKIT_DISABLED": "1"})
+    assert rows(server, "Claude_Compactions") == []
+    stop_hook(tmp_path, one_turn(tmp_path))                                  # without the switch it works again
+    assert len(stop_events(server)) == 1

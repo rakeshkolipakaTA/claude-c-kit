@@ -62,6 +62,8 @@ def configured_model(root):
 
 
 def main():
+    if os.environ.get("CCKIT_DISABLED", "").lower() in ("1", "true", "yes", "on"):      # per-machine off switch: every cckit hook does nothing
+        return
     if os.environ.get("CCKIT_OPUS_REMINDER", "").lower() in ("off", "0", "false", "no"):
         return
     try:

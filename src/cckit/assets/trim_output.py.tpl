@@ -10,6 +10,7 @@ passed through untouched. Edit .cckit/cckit.toml and re-run `cckit init` to chan
 """
 import json
 import re
+import os
 import sys
 from collections import deque
 
@@ -53,6 +54,9 @@ def trim(lines_in, out) -> None:
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "--trim":
         trim(sys.stdin, sys.stdout)
+        return
+    if os.environ.get("CCKIT_DISABLED", "").lower() in ("1", "true", "yes", "on"):      # per-machine off switch (the --trim filter above still passes output on)
+        print("{}")
         return
     try:
         data = json.load(sys.stdin)

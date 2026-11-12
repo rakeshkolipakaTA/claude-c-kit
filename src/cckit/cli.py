@@ -1,4 +1,4 @@
-"""Command line: cckit init (install) | uninstall | reinstall | login | register | whoami | server | doctor | report | run | print-settings."""
+"""Command line: cckit init (install) | uninstall | reinstall | disable | enable | login | register | whoami | server | doctor | report | run | print-settings."""
 from __future__ import annotations
 
 import argparse
@@ -135,9 +135,10 @@ def _register_flow(cfg: dict, root: Path, email: str | None, github: str | None,
     return 0
 
 
-def cmd_uninstall(args) -> int:
-    """Take cckit out of the repo: show exactly what goes, ask, then remove it."""
+def cmd_uninstall(args, final: bool = True) -> int:
+    """Take cckit out of the repo: show exactly what goes, ask, then remove it. args.done tells the caller that the files really were removed."""
     root = _root(args)
+    args.done = False
     try:
         res = uninstall.uninstall(root, purge=args.purge, force=args.force, dry_run=True)
     except ValueError as e:
@@ -150,6 +151,7 @@ def cmd_uninstall(args) -> int:
         return 0
     if not doing:
         print("\nNothing to remove.")
+        args.done = True
         return 0
     if not args.yes:
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -163,8 +165,32 @@ def cmd_uninstall(args) -> int:
             print("\nCancelled; nothing was removed.")
             return 130
     uninstall.uninstall(root, purge=args.purge, force=args.force, dry_run=False)
-    print("\nRemoved. This machine's registration is kept (~/.config/cckit/identity.json). To install again here: `cckit install`.")
+    args.done = True
+    if final:
+        print("\nRemoved. This machine's registration is kept (~/.config/cckit/identity.json). To install again here: `cckit install`.")
     return 0
+
+
+def cmd_disable(args) -> int:
+    """Switch cckit off for this repo: remove what it generated (hooks, rules, CLAUDE.md block ...) but keep .cckit/cckit.toml, the key and the log, then mark the repo disabled."""
+    args.purge = False
+    rc = cmd_uninstall(args, final=False)
+    if rc != 0 or args.dry_run or not args.done:
+        return rc
+    config.set_enabled(_root(args), False)
+    print("\ncckit is switched off for this repo. Your settings and the team key are kept in .cckit/. Commit the change; teammates who pull get it too."
+          "\nTo switch it on again: `cckit enable`. To switch it off on one machine only, set CCKIT_DISABLED=1.")
+    return 0
+
+
+def cmd_enable(args) -> int:
+    """Switch cckit on again: mark the repo enabled, then run init."""
+    if args.dry_run:
+        print("Dry run: would set [cckit] enabled = true and run `cckit init`.")
+        return 0
+    config.set_enabled(_root(args), True)
+    print("cckit is switched on for this repo.\n")
+    return cmd_init(argparse.Namespace(path=args.path, force=args.force, dry_run=False))
 
 
 def cmd_reinstall(args) -> int:
@@ -416,6 +442,16 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("uninstall", help="take cckit out of this repo again (its files, hooks, CLAUDE.md block and .gitignore block); your own text is kept")
     removal(p)
     p.set_defaults(fn=cmd_uninstall)
+
+    p = sub.add_parser("disable", help="switch cckit off for this repo: removes what it generated (hooks, rules, CLAUDE.md block), keeps your settings and key")
+    removal(p)
+    p.set_defaults(fn=cmd_disable)
+
+    p = sub.add_parser("enable", help="switch cckit on again for this repo (sets [cckit] enabled = true and runs init)")
+    common(p)
+    p.add_argument("--force", action="store_true", help="overwrite files and values you changed")
+    p.add_argument("--dry-run", action="store_true", help="show what would change, write nothing")
+    p.set_defaults(fn=cmd_enable)
 
     p = sub.add_parser("reinstall", help="a fresh install: uninstall, then init. Keeps your settings and key unless --purge; generated files you edited are replaced (the plan lists them)")
     removal(p)

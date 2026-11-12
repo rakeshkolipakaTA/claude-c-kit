@@ -11,13 +11,14 @@ Columns: timestamp, session_id, message_id, model, input_tokens, output_tokens, 
 
 Reporting (only when [telemetry] stop_report is on and this machine is registered): the same numbers are added up per model and sent to the team's
 usage API as trigger "stop" events, at most once every `stop_interval` seconds (default: every Stop). An event holds the company e-mail and token, the model, the token counts since the previous
-event (main + subagents), request counts, how many times this hook fired (turns) and how many seconds the turn took from the prompt to the last line, how many minutes the session has been running, the current model, effort, Claude Code version, entrypoint, branch and the tool names used, the current context size, the repo folder name and the session id: no prompts, code or replies. Events
+event (main + subagents), request counts, how many times this hook fired (turns) and how many seconds the turn took from the prompt to the last line, how many minutes the session has been running, the current model, effort, Claude Code version, entrypoint, branch and the tool names used, the current context size, how the developer is billed (billing: subscription | metered | unknown, plan: team, max, api...) and the login's plan details (organisation name and type, seat tier, billing type, extra usage on/off, rate-limit tier), the repo folder name and the session id: no prompts, code or replies. Events
 that could not be delivered wait in the state file (at most 200, retried with a growing pause) and are sent with a fixed event id, so a retry
 never counts twice. Opt out on one machine with CCKIT_TELEMETRY=off.
 """
 import csv
 import io
 import json
+import shutil
 import os
 import sys
 import platform
@@ -252,6 +253,78 @@ def load_identity(cwd="."):
     return rec if valid_record(rec) else default
 
 
+BILLING = __BILLING__                # .cckit/cckit.toml [usage] billing: auto | metered | subscription
+LOGIN_FIELDS = ("org_name", "org_type", "seat_tier", "billing_type", "extra_usage", "rate_limit_tier")
+
+
+def truthy(name):
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def clean(v, n=40):
+    return re.sub(r"[^A-Za-z0-9 _.\-]", "", v)[:n].strip() if isinstance(v, str) else ""
+
+
+def read_json(p):
+    try:
+        d = json.loads(Path(p).read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def login_info():
+    """What Claude Code knows about the account it is logged in to, only the fields about the PLAN: subscription (pro, max, team, enterprise), organisation
+    name and type, seat tier, billing type, whether extra (pay-per-token) usage is switched on, rate-limit tier. Read from its own files (.credentials.json and
+    .claude.json), else `claude auth status`. The e-mail, name, ids and tokens of the login are never read into the result or sent."""
+    home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
+    cred = read_json(home / ".credentials.json").get("claudeAiOauth")
+    cred = cred if isinstance(cred, dict) else {}
+    acct = read_json((home / ".claude.json") if os.environ.get("CLAUDE_CONFIG_DIR") else (Path.home() / ".claude.json")).get("oauthAccount")
+    acct = acct if isinstance(acct, dict) else {}
+    plan = clean(cred.get("subscriptionType"), 20).lower()
+    org = clean(acct.get("organizationName"), 60)
+    if not plan or not org:
+        exe = shutil.which("claude")
+        if exe:
+            try:
+                d = json.loads(subprocess.run([exe, "auth", "status"], capture_output=True, text=True, timeout=5).stdout)
+                if d.get("authMethod") == "claude.ai":
+                    plan = plan or clean(d.get("subscriptionType"), 20).lower()
+                    org = org or clean(d.get("orgName"), 60)
+            except Exception:
+                pass
+    extra = acct.get("hasExtraUsageEnabled")
+    return {"plan": plan, "org_name": org, "org_type": clean(acct.get("organizationType")), "seat_tier": clean(acct.get("seatTier")),
+            "billing_type": clean(acct.get("billingType")), "extra_usage": "yes" if extra is True else "no" if extra is False else "",
+            "rate_limit_tier": clean(cred.get("rateLimitTier") or acct.get("userRateLimitTier"))}
+
+
+def detect_billing(cache=None):
+    """How the developer who runs this session is billed, as a dict: billing ("subscription" = a Claude.ai login: a Pro, Max, Team or Enterprise seat, no cost
+    per token; "metered" = an API key or a cloud provider (Bedrock, Vertex, Foundry), billed per token; "unknown"), plan (pro | max | team | enterprise | api |
+    bedrock | vertex | foundry) and, for a login, the LOGIN_FIELDS. [usage] billing in the config overrides "billing" for the whole repo."""
+    sig = [truthy("CLAUDE_CODE_USE_BEDROCK"), truthy("CLAUDE_CODE_USE_VERTEX"), truthy("CLAUDE_CODE_USE_FOUNDRY"),
+           bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))]
+    if isinstance(cache, dict) and cache.get("sig") == sig and time.time() - float(cache.get("at") or 0) < 43200 and isinstance(cache.get("v"), dict):
+        out = dict(cache["v"])
+    else:
+        out = {"billing": "unknown", "plan": ""}
+        for i, name in enumerate(("bedrock", "vertex", "foundry", "api")):
+            if sig[i]:
+                out = {"billing": "metered", "plan": name}              # a provider or key decides; the login's account is not what is billed
+                break
+        else:
+            info = login_info()
+            out = dict(info, billing="subscription" if info["plan"] else "unknown")
+        if isinstance(cache, dict):
+            cache.clear()
+            cache.update({"sig": sig, "at": time.time(), "v": dict(out)})
+    if BILLING in ("metered", "subscription"):
+        out["billing"] = BILLING
+    return out
+
+
 def env_int(name, lo, hi):
     try:
         v = int(os.environ.get(name, ""))
@@ -316,6 +389,9 @@ def flush_pending(state, now, project):
         return
     box = state.get("outbox") if isinstance(state.get("outbox"), list) else []
     main = max(pend, key=lambda k: pend[k]["o"])
+    cache = state.get("billing") if isinstance(state.get("billing"), dict) else {}
+    bill = detect_billing(cache)
+    state["billing"] = cache
     t = state.get("turn") if isinstance(state.get("turn"), dict) else {}
     tools = t.get("tools") if isinstance(t.get("tools"), dict) else {}
     for model, p in pend.items():
@@ -328,7 +404,7 @@ def flush_pending(state, now, project):
                     "tools": ";".join("%s:%d" % kv for kv in sorted(tools.items(), key=lambda kv: -kv[1])[:8]) if first else "",
                     "input_tokens": p["i"], "output_tokens": p["o"], "cache_read": p["cr"], "cache_write": p["cw"], "requests": p["req"], "sub_requests": p["sreq"], "sub_output": p["sout"],
                     "context_tokens": p["ctx"], "window": effective_window(), "compact_pct": effective_pct(), "project": project, "session": p["session"], "os": platform.system(),
-                    "client": "cckit-stop/2"})
+                    "client": "cckit-stop/4", **{k: bill.get(k, "") for k in ("billing", "plan") + LOGIN_FIELDS}})
         box[-1] = {k: v for k, v in box[-1].items() if v is not None}       # an unknown duration is left out (stored as empty), never sent as 0
     state["stops"] = 0
     state["turn"] = {}
@@ -385,6 +461,8 @@ CSV_FILE = [None]       # set in main(); a list so that new_rows can read it wit
 
 
 def main():
+    if os.environ.get("CCKIT_DISABLED", "").lower() in ("1", "true", "yes", "on"):      # per-machine off switch: every cckit hook does nothing
+        return
     if os.environ.get("CCKIT_USAGE_LOG", "").lower() in ("off", "0", "false", "no"):
         return
     try:

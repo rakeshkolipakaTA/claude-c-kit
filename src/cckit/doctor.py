@@ -83,6 +83,9 @@ def run(root: Path, check_claude: bool = True) -> Report:
         r.add("fail", e)
     if errs:
         return r
+    if not cfg["cckit"]["enabled"]:
+        r.add("info", "cckit is switched off for this repo ([cckit] enabled = false): nothing is generated or checked. `cckit enable` switches it on again")
+        return r
     cfg_file = config.config_path(root)
     r.add("ok", f"{cfg_file.relative_to(root).as_posix()} is valid" + ("" if cfg_file.exists() else " (defaults; file not created yet, run `cckit init`)"))
     if cfg_file.name == config.LEGACY_CONFIG_NAME and cfg_file.parent == Path(root):

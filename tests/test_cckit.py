@@ -742,3 +742,53 @@ def test_deny_globs_reach_nested_folders(repo):
     deny = s["permissions"]["deny"]
     assert "Read(**/node_modules/**)" in deny and "Read(**/venv/**)" in deny and "Read(dist/**)" in deny and "Read(**/dist/**)" not in deny
     assert 'unless it may have changed' in render.build_claude_md_block(config.defaults())
+
+
+# ------------------------------------------------------------------ enable / disable
+def test_disable_removes_the_setup_keeps_the_settings_and_enable_brings_it_back(repo):
+    before = lived_in(repo)
+    apply.init(repo)
+    installed = tree(repo)
+    assert cli.main(["disable", str(repo), "--yes"]) == 0
+    after = tree(repo)
+    for k, v in before.items():
+        assert after[k] == v, k                                                       # the repo's own files are exactly as before
+    assert set(after) - set(before) == {".cckit/cckit.toml"}
+    assert "enabled = false" in read(repo / ".cckit/cckit.toml") and "tail_lines" in read(repo / ".cckit/cckit.toml")       # the settings and their comments are kept
+    assert config.load(repo)["cckit"]["enabled"] is False
+    with pytest.raises(ValueError, match="switched off"):
+        apply.init(repo)                                                              # init does not quietly undo a disable
+    r = doctor.run(repo, check_claude=False)
+    assert not r.failed and any("switched off" in m for _, m in r.items)
+    assert cli.main(["enable", str(repo)]) == 0
+    assert config.load(repo)["cckit"]["enabled"] is True
+    assert tree(repo) == installed                                                    # the same files as before the disable
+
+
+def test_disable_dry_run_and_cancel_change_nothing(repo, monkeypatch):
+    apply.init(repo)
+    before = tree(repo)
+    assert cli.main(["disable", str(repo), "--dry-run"]) == 0
+    assert tree(repo) == before
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_: "")
+    assert cli.main(["disable", str(repo)]) == 0
+    assert tree(repo) == before and config.load(repo)["cckit"]["enabled"] is True      # answering no leaves cckit on
+
+
+def test_set_enabled_keeps_the_file_and_handles_a_config_from_before_the_option(repo):
+    p = repo / ".cckit/cckit.toml"
+    p.write_text('# mine\n[model]\neffort = "low"\n')
+    config.set_enabled(repo, False)
+    assert read(p) == '[cckit]\nenabled = false\n\n# mine\n[model]\neffort = "low"\n'
+    config.set_enabled(repo, True)
+    assert 'enabled = true' in read(p) and config.load(repo)["model"]["effort"] == "low"
+    config.set_enabled(repo, False)
+    config.set_enabled(repo, True)
+    assert read(p).count("enabled") == 1
+
+
+def test_enable_works_on_a_repo_that_never_had_cckit(repo):
+    assert cli.main(["enable", str(repo)]) == 0
+    assert (repo / ".cckit/hooks/log_token_usage.py").exists() and config.load(repo)["cckit"]["enabled"] is True

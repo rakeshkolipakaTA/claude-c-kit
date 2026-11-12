@@ -20,6 +20,9 @@ DEFAULT_TOML = '''\
 # Edit this file, then run:   cckit init      (safe to re-run; it only touches what it owns)
 # Check everything with:      cckit doctor
 
+[cckit]
+enabled = true                # false = cckit is switched off for this repo (what `cckit disable` sets: it also removes the generated files, and `cckit enable` brings them back)
+
 [model]
 default = "sonnet"            # alias (sonnet | haiku | opus | fable) or a full model name. "sonnet" is Sonnet 5.5 on the
                               # Anthropic API; cloud providers map it to their own version, so pin a full name there.
@@ -91,6 +94,9 @@ otel_endpoint = ""            # set to your collector (for example http://collec
 log = true                    # a Stop hook appends the token counts of every response to csv_path (numbers only; local; git-ignored)
 csv_path = ".cckit/token_usage.csv"
 scripts = true                # install usage_report.py and the /usage command: Claude or you can run them for session usage and estimated cost
+billing = "auto"              # auto | metered | subscription. How usage is billed, which the usage app uses to separate cost from plain usage. "auto" = every developer's hooks
+                              # look at their own login: a Claude.ai login (Pro, Max, Team, Enterprise) is "subscription", an API key / Bedrock / Vertex / Foundry is "metered".
+                              # Set "metered" or "subscription" to force one value for everyone on this repo
 
 [telemetry]                   # report every context compaction to the team usage app (see `cckit register`). false = nothing is registered or sent
 enabled = true
@@ -131,6 +137,7 @@ max_effort_level = "high"
 
 EFFORTS = ("low", "medium", "high", "xhigh")
 LANGUAGES = ("python", "typescript", "java")
+BILLINGS = ("auto", "metered", "subscription")
 MODEL_ALIASES = ("sonnet", "haiku", "opus", "fable")
 
 
@@ -155,6 +162,22 @@ def config_path(root: Path) -> Path:
     root = Path(root)
     new, old = root / CONFIG_NAME, root / LEGACY_CONFIG_NAME
     return old if (not new.exists() and old.exists()) else new
+
+
+def set_enabled(root: Path, enabled: bool) -> Path:
+    """Write `[cckit] enabled = true|false` into .cckit/cckit.toml, keeping every other line and comment. Creates the file from the defaults when it is missing."""
+    path = config_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = path.read_text(encoding="utf-8") if path.exists() else DEFAULT_TOML
+    value = "true" if enabled else "false"
+    new, n = re.subn(r"(?m)^(\[cckit\][^\[]*?^enabled\s*=\s*)(true|false)", lambda m: m.group(1) + value, text, count=1, flags=re.S)
+    if not n:
+        if re.search(r"(?m)^\[cckit\]\s*$", text):
+            new = re.sub(r"(?m)^(\[cckit\]\s*)$", lambda m: m.group(1) + "\nenabled = " + value, text, count=1)
+        else:
+            new = f"[cckit]\nenabled = {value}\n\n" + text
+    path.write_text(new, encoding="utf-8", newline="\n")
+    return path
 
 
 KEY_RX = re.compile(r"[A-Za-z0-9_\-]{4,128}")
@@ -301,7 +324,11 @@ def validate(cfg: dict) -> list[str]:
         errs.append("[monitoring] warn_context_pct must be an integer from 1 to 100")
     if not isinstance(mon.get("otel_endpoint"), str):
         errs.append("[monitoring] otel_endpoint must be a string")
+    if not isinstance(cfg.get("cckit", {}).get("enabled"), bool):
+        errs.append("[cckit] enabled must be true or false")
     us = cfg["usage"]
+    if us.get("billing") not in BILLINGS:
+        errs.append("[usage] billing must be \"auto\", \"metered\" or \"subscription\"")
     for k in ("log", "scripts"):
         if not isinstance(us.get(k), bool):
             errs.append(f"[usage] {k} must be true or false")

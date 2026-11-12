@@ -158,6 +158,7 @@ def render_log_script(cfg: dict) -> str:
             .replace("__DOMAINS__", json.dumps(list(t["allowed_domains"])))
             .replace("__USAGE_URL__", json.dumps(config.api_url(t, "usage")))
             .replace("__FLUSH_EVERY__", str(int(t["stop_interval"])))
+            .replace("__BILLING__", json.dumps(cfg["usage"]["billing"]))
             .replace("__WINDOW__", str(cfg["context"]["auto_compact_window"]))
             .replace("__SEND_PROJECT__", "True" if t["send_project"] else "False"))
 
@@ -214,6 +215,7 @@ def render_compact_script(cfg: dict) -> str:
             .replace("__DOMAINS__", json.dumps(list(t["allowed_domains"])))
             .replace("__AUTO_REGISTER__", "True" if t["auto_register"] else "False")
             .replace("__TRIGGERS__", json.dumps(list(t["events"])))
+            .replace("__BILLING__", json.dumps(cfg["usage"]["billing"]))
             .replace("__WINDOW__", str(cfg["context"]["auto_compact_window"]))
             .replace("__SEND_PROJECT__", "True" if t["send_project"] else "False"))
 
@@ -452,7 +454,7 @@ def build_mcp_profiles(cfg: dict) -> dict[str, str]:
 
 
 # ----------------------------------------------------------------------------- the server side: a standalone app
-USAGE_APP_FILES = {"README.md": "README.md", "Dockerfile": "Dockerfile", ".env.example": "env.example", ".gitignore": "gitignore", ".dockerignore": "dockerignore"}
+USAGE_APP_FILES = {"README.md": "README.md", "DASHBOARD.md": "DASHBOARD.md", "Dockerfile": "Dockerfile", ".env.example": "env.example", ".gitignore": "gitignore", ".dockerignore": "dockerignore"}
 
 
 def build_usage_app() -> dict[str, str]:
