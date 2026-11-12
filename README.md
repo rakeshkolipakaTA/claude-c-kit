@@ -16,7 +16,7 @@ sudo apt update && sudo apt install -y python3 python3-venv python3-pip git
 # create the environment and install cckit
 python3 -m venv ~/.cckit-venv
 ~/.cckit-venv/bin/python -m pip install --upgrade pip
-~/.cckit-venv/bin/python -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.4"
+~/.cckit-venv/bin/python -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.5"
 
 # make `cckit` available in every terminal (without activating the environment)
 mkdir -p ~/.local/bin && ln -sf ~/.cckit-venv/bin/cckit ~/.local/bin/cckit
@@ -39,7 +39,7 @@ winget install Git.Git
 # create the environment and install cckit
 py -3.12 -m venv $env:USERPROFILE\.cckit-venv
 & "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install --upgrade pip
-& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.4"
+& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.5"
 
 # use it without activating: put the environment's Scripts folder on your PATH (once, then open a new PowerShell)
 [Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:USERPROFILE\.cckit-venv\Scripts", "User")
@@ -65,7 +65,7 @@ git add CLAUDE.md .claude .cckit && git commit -m "Add cckit"
 - **`cckit` is "not found":** run it through Python instead, which is the same program: `~/.cckit-venv/bin/python -m cckit init` (Windows: `& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m cckit init`).
 - **`requires a different Python` (for example `3.9.x not in '>=3.10'`):** the environment was created with an old Python. Check with `python --version` (inside the environment) or `py -0p` (Windows), delete the environment folder, and create it again with a newer one: `py -3.12 -m venv ...` on Windows, `python3.12 -m venv ...` on Linux.
 - **`pip install` fails with a git error:** git is missing or not on the PATH (`git --version`), or there is no network access to github.com.
-- **Without a virtual environment** (not recommended): `python3 -m pip install --user "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.4"`; on recent Ubuntu this needs `--break-system-packages`, which is why the environment above is the better choice.
+- **Without a virtual environment** (not recommended): `python3 -m pip install --user "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.5"`; on recent Ubuntu this needs `--break-system-packages`, which is why the environment above is the better choice.
 - **From a clone of this repo** (for development): `python3 -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"` (Windows: `.venv\Scripts\Activate.ps1`).
 
 **Where things live (0.2.2+).** Everything cckit owns is under `.cckit/`: `cckit.toml` (settings), `key.json` (optional team key), `hooks/` and `scripts/` (the generated Python files), `token_usage.csv` (local log, git-ignored), `manifest.json`. Only what Claude Code itself requires stays in `.claude/` (`settings.json`, `agents/`, `rules/`, `commands/usage.md`) plus `CLAUDE.md`. Upgrading: `cckit init` moves an old `cckit.toml`, the hook scripts, the log and a `team_key` line into place by itself, and keeps what you edited.
@@ -99,8 +99,8 @@ Upgrading cckit changes nothing in a repo until someone runs `cckit init` there;
 # 1. which version is the newest?
 git ls-remote --tags --refs --sort=-v:refname https://github.com/rakeshkolipakaTA/claude-c-kit.git | head -3
 
-# 2. upgrade cckit (Linux / macOS; replace v0.2.4 with the newest tag)
-~/.cckit-venv/bin/python -m pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.4"
+# 2. upgrade cckit (Linux / macOS; replace v0.2.5 with the newest tag)
+~/.cckit-venv/bin/python -m pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.5"
 cckit --version
 
 # 3. in each repo that uses cckit
@@ -108,12 +108,12 @@ cd your-repo
 cckit init --dry-run        # shows what would change, writes nothing
 cckit init                  # applies it (files you edited yourself are kept and listed; --force overwrites them)
 cckit doctor
-git add CLAUDE.md .claude .cckit && git commit -m "Update cckit to v0.2.4" && git push
+git add CLAUDE.md .claude .cckit && git commit -m "Update cckit to v0.2.5" && git push
 ```
 
 ```powershell
 # Windows (PowerShell): step 2
-& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.4"
+& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.5"
 cckit --version
 ```
 
@@ -127,6 +127,7 @@ If pip says `requires a different Python`, see [Troubleshooting](#remove-and-tro
 
 | Version | Main changes |
 |---|---|
+| 0.2.5 | Clearer prompts: what the e-mail is for, that Enter accepts the suggestion, what the team key is; README rollout and upgrade process |
 | 0.2.4 | One identity per e-mail; a changed git e-mail registers itself; no GitHub login from `gh`; Python 3.10 supported; install steps for Ubuntu and Windows |
 | 0.2.2 | Everything cckit owns lives in `.cckit/`; the team key in `.cckit/key.json`; the Opus "Model tip" reminder |
 | 0.2.1 | One Stop event per turn, with current model, effort, tools, duration, turns, session minutes and the compaction window in force |

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-cost-kit"
-version = "0.2.4"
+version = "0.2.5"
 description = "Generate cost-saving Claude Code settings, CLAUDE.md, subagents, hooks and usage reports inside a repo."
 readme = "README.md"
 requires-python = ">=3.10"
