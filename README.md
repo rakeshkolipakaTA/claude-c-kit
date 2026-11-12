@@ -3,182 +3,61 @@
 A small Python package that writes **cost-saving Claude Code configuration into a repo**, so every developer who opens
 the repo gets the same cheap, safe defaults without setting anything up by hand.
 
-## Install
+## Quick start
 
-You need **Python 3.10 or newer** and **git** (pip fetches the package from GitHub). pip also installs the small `tomli` package on Python 3.10 (3.11+ has it built in); there are no other dependencies, and no pipx is needed. Install into a **virtual environment** (one per machine is enough): it works everywhere, and recent Ubuntu/Debian and macOS Python refuse a plain `pip install` with `externally-managed-environment`. Pin the tag so the whole team gets the same version.
+You need Python 3.10+ and git. Install cckit once per machine, in its own virtual environment so it never touches your other Python packages.
 
-### Ubuntu / Debian / Linux / macOS
-
+**Linux / macOS**
 ```bash
-# once: Python, venv and git (Ubuntu / Debian)
-sudo apt update && sudo apt install -y python3 python3-venv python3-pip git
-
-# create the environment and install cckit
 python3 -m venv ~/.cckit-venv
-~/.cckit-venv/bin/python -m pip install --upgrade pip
-~/.cckit-venv/bin/python -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.5"
-
-# make `cckit` available in every terminal (without activating the environment)
+~/.cckit-venv/bin/pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.6"
 mkdir -p ~/.local/bin && ln -sf ~/.cckit-venv/bin/cckit ~/.local/bin/cckit
-cckit --version                       # if "not found": open a new terminal, or add  export PATH="$HOME/.local/bin:$PATH"  to ~/.bashrc
 ```
 
-Or activate the environment instead of the symlink: `source ~/.cckit-venv/bin/activate` (then `cckit ...`; `deactivate` leaves it).
-**Python version:** Ubuntu 22.04 (Python 3.10) and 24.04 (3.12) both work. Debian 11 and older ship Python 3.9 or older, which is too old: install a newer one first, for example
-`sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt update && sudo apt install -y python3.12 python3.12-venv` and then use `python3.12 -m venv ~/.cckit-venv` in place of `python3 -m venv ...`.
-On macOS, `python3` and `git` come with the Xcode command line tools or `brew install python git`.
-
-### Windows (PowerShell)
-
+**Windows (PowerShell)**
 ```powershell
-# once: Python and git (skip what you already have)
-winget install Python.Python.3.12
-winget install Git.Git
-# close and reopen PowerShell so that `py` and `git` are found. `py -0p` lists the Pythons you have; if you already have 3.10 or newer you can skip the Python line and use `py -3.10` (or your version) below
-
-# create the environment and install cckit
-py -3.12 -m venv $env:USERPROFILE\.cckit-venv
-& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install --upgrade pip
-& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.5"
-
-# use it without activating: put the environment's Scripts folder on your PATH (once, then open a new PowerShell)
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:USERPROFILE\.cckit-venv\Scripts", "User")
-cckit --version
+py -m venv $env:USERPROFILE\.cckit-venv
+& "$env:USERPROFILE\.cckit-venv\Scripts\pip.exe" install "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.6"
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:USERPROFILE\.cckit-venv\Scripts", "User")
 ```
+Open a new terminal and check: `cckit --version`.
 
-Or activate it for the current window: `& "$env:USERPROFILE\.cckit-venv\Scripts\Activate.ps1"`. If PowerShell says scripts are disabled, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned` first (it only affects that window), or use **Command Prompt** instead: `%USERPROFILE%\.cckit-venv\Scripts\activate.bat`.
-On Windows the hooks must call `python`, not `python3`: after `cckit init`, set `python = "python"` under `[hooks]` in `.cckit/cckit.toml` and run `cckit init` again.
-
-### Use it in a repo (any system)
-
+**Then, in each repo** (the admin does this once; everyone else just runs `git pull`):
 ```bash
 cd your-repo
-cckit login                 # company e-mail + the token you were given (or `cckit init`, which asks for the e-mail and team key)
-cckit doctor                # checks the repo against .cckit/cckit.toml
-git add CLAUDE.md .claude .cckit && git commit -m "Add cckit"
-```
-
-### Remove and troubleshooting
-
-- **Upgrade:** see [Upgrading](#upgrading) below.
-- **Remove cckit itself, or start over:** see [Uninstall and reinstall](#uninstall-and-reinstall).
-- **`cckit` is "not found":** run it through Python instead, which is the same program: `~/.cckit-venv/bin/python -m cckit init` (Windows: `& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m cckit init`).
-- **`requires a different Python` (for example `3.9.x not in '>=3.10'`):** the environment was created with an old Python. Check with `python --version` (inside the environment) or `py -0p` (Windows), delete the environment folder, and create it again with a newer one: `py -3.12 -m venv ...` on Windows, `python3.12 -m venv ...` on Linux.
-- **`pip install` fails with a git error:** git is missing or not on the PATH (`git --version`), or there is no network access to github.com.
-- **Without a virtual environment** (not recommended): `python3 -m pip install --user "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.5"`; on recent Ubuntu this needs `--break-system-packages`, which is why the environment above is the better choice.
-- **From a clone of this repo** (for development): `python3 -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"` (Windows: `.venv\Scripts\Activate.ps1`).
-
-**Where things live (0.2.2+).** Everything cckit owns is under `.cckit/`: `cckit.toml` (settings), `key.json` (optional team key), `hooks/` and `scripts/` (the generated Python files), `token_usage.csv` (local log, git-ignored), `manifest.json`. Only what Claude Code itself requires stays in `.claude/` (`settings.json`, `agents/`, `rules/`, `commands/usage.md`) plus `CLAUDE.md`. Upgrading: `cckit init` moves an old `cckit.toml`, the hook scripts, the log and a `team_key` line into place by itself, and keeps what you edited.
-
-Edit `.cckit/cckit.toml`, run `cckit init` again, and only what changed is rewritten.
-
-## Rolling it out to a team
-
-**Admin, once per team.** Deploy the usage app (the team uses the one in `[telemetry]`; `cckit server export-app` writes a deployable copy) and keep its **team key**. Set the model prices on the app's "Models & Cost" page, in USD per million tokens, for every model your developers use (the app works the cost out from the token counts, so a price can be corrected later for past reports too).
-
-**Admin, per repo** (needs cckit installed, see [Install](#install)):
-
-```bash
-cd your-repo
-cckit init                  # writes .cckit/, .claude/ and the CLAUDE.md block; asks for your company e-mail and the team key once
-cckit doctor                # everything should say ok; fix any warning it names
-# private repository only, to register teammates automatically (otherwise skip, or git-ignore the file):
-#   .cckit/key.json  containing  {"key": "THE-TEAM-KEY"}
+cckit init
 git add CLAUDE.md .claude .cckit && git commit -m "Add cckit" && git push
 ```
+`cckit init` asks for your company e-mail (press Enter to accept the suggestion) and, the first time, the team key your admin gave you.
 
-**Developers.** They only `git pull`. cckit does **not** need to be installed for them: the generated files are plain files and the hooks are standalone Python. They need Python 3 on the PATH (set `[hooks] python = "python"` on Windows) and must accept Claude Code's "trust this folder" prompt. At the first session the start-up hook registers them from `git config user.email` when it is a company address and the key is in `.cckit/key.json` (they see one line saying so); otherwise they run `cckit register` or `cckit login`, or set `CCKIT_TEAM_KEY`. Opt out on one machine: `CCKIT_TELEMETRY=off`.
+**Teammates** only `git pull`. cckit does not need to be installed for them; Claude Code asks them once to trust the folder, and the first session registers them (they see one line saying so). To switch the usage reporting off on one machine: `CCKIT_TELEMETRY=off`.
 
-**Check it works:** `cckit whoami --check` (app reachable, who this machine reports as), `/usage` inside Claude Code (local numbers), and the app's dashboard (the first events appear after the first answered prompt).
-
-## Upgrading
-
-Upgrading cckit changes nothing in a repo until someone runs `cckit init` there; the generated files then follow the new version. **Admin steps** (developers only `git pull` afterwards):
+## Upgrade
 
 ```bash
-# 1. which version is the newest?
-git ls-remote --tags --refs --sort=-v:refname https://github.com/rakeshkolipakaTA/claude-c-kit.git | head -3
-
-# 2. upgrade cckit (Linux / macOS; replace v0.2.5 with the newest tag)
-~/.cckit-venv/bin/python -m pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.5"
-cckit --version
-
-# 3. in each repo that uses cckit
-cd your-repo
-cckit init --dry-run        # shows what would change, writes nothing
-cckit init                  # applies it (files you edited yourself are kept and listed; --force overwrites them)
-cckit doctor
-git add CLAUDE.md .claude .cckit && git commit -m "Update cckit to v0.2.5" && git push
+~/.cckit-venv/bin/pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.6"     # Windows: use ...\.cckit-venv\Scripts\pip.exe
+cd your-repo && cckit init && git add CLAUDE.md .claude .cckit && git commit -m "Update cckit" && git push
 ```
+Use the newest tag (`git ls-remote --tags --refs --sort=-v:refname https://github.com/rakeshkolipakaTA/claude-c-kit.git | head -3`). Pin the same tag for everyone and let one person commit the regenerated files. Coming from before 0.2.2, `cckit init` moves the old files into `.cckit/` by itself.
 
-```powershell
-# Windows (PowerShell): step 2
-& "$env:USERPROFILE\.cckit-venv\Scripts\python.exe" -m pip install --upgrade "git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@v0.2.5"
-cckit --version
-```
-
-If pip says `requires a different Python`, see [Troubleshooting](#remove-and-troubleshooting). Pin the same tag for everyone and let **one person** commit the regenerated files, otherwise two people on different versions produce different generated files. To go back, install the older tag the same way and run `cckit init --force`.
-
-| Coming from (rows add up: apply every row that applies to your version) | What happens when you run `cckit init` | What else to know |
-|---|---|---|
-| 0.1.x / 0.2.0 | Nothing special: the files are regenerated. | 0.2.1+ reports one event per turn (not one a minute); the usage app must have the columns `turns`, `duration_s`, `current_model`, `compact_pct` and a higher hourly limit (about 600). |
-| anything before 0.2.2 | `cckit.toml` moves to `.cckit/cckit.toml`; the hook scripts move to `.cckit/hooks/` and `.cckit/scripts/`; the usage log moves to `.cckit/token_usage.csv`; a `team_key = "..."` line moves to `.cckit/key.json` and is removed from the config; the old files are removed (an edited one is kept). | A key that was committed before stays in git history: rotate it. |
-| anything before 0.2.4 | Nothing to do. | The identity file keeps working; from now on it keeps one record per e-mail and each repo reports as its git e-mail, and the GitHub login is no longer taken from the `gh` CLI. Python 3.10 is enough from 0.2.3 on. |
-
-| Version | Main changes |
-|---|---|
-| 0.2.5 | Clearer prompts: what the e-mail is for, that Enter accepts the suggestion, what the team key is; README rollout and upgrade process |
-| 0.2.4 | One identity per e-mail; a changed git e-mail registers itself; no GitHub login from `gh`; Python 3.10 supported; install steps for Ubuntu and Windows |
-| 0.2.2 | Everything cckit owns lives in `.cckit/`; the team key in `.cckit/key.json`; the Opus "Model tip" reminder |
-| 0.2.1 | One Stop event per turn, with current model, effort, tools, duration, turns, session minutes and the compaction window in force |
-| 0.2.0 | Stop-hook reporting per model; `cckit login`; `python -m cckit` |
-
-## Uninstall and reinstall
-
-There are two separate things to remove: cckit **in a repo** (its files and settings) and cckit **on a machine** (the program).
-
-### In a repo: `cckit uninstall`
+## Uninstall or start fresh
 
 ```bash
-cd your-repo
-cckit uninstall --dry-run   # lists exactly what would go; removes nothing
-cckit uninstall             # shows the same list, asks for confirmation (Enter = no), then removes it  (--yes skips the question)
-git add -A && git commit -m "Remove cckit" && git push
+cckit uninstall        # in a repo: lists what it will remove, asks, then removes only what cckit added
+cckit reinstall        # in a repo: uninstall, then install again (for a repo where something broke)
 ```
+Your own `CLAUDE.md` text, `.gitignore` lines and settings stay. Your `.cckit/cckit.toml`, team key and local usage log are kept too, unless you add `--purge`. `--dry-run` shows the list without removing anything. Teammates just `git pull`.
 
-It removes only what cckit put there: the generated hooks, scripts, subagents, rules, MCP profiles and the `/usage` command; the `CLAUDE.md` block and the `.gitignore` block (your own text is kept, line endings included, and a file that held only our block is deleted); and the model, permission rules and hooks cckit added to `.claude/settings.json` (your own keys stay). A generated file **you edited** is kept and listed, unless you add `--force`. If a hand-edited file or a stray `<!-- cckit:begin -->` marker would make it guess, it stops and changes nothing.
+To remove cckit from a machine, delete its folder: `rm -rf ~/.cckit-venv ~/.local/bin/cckit` (Windows: `Remove-Item -Recurse -Force $env:USERPROFILE\.cckit-venv`). Repos keep working without it.
 
-**Kept by default** (they are yours, and a later `cckit install` uses them again): `.cckit/cckit.toml`, `.cckit/key.json` and the local usage log `.cckit/token_usage.csv`. Add `--purge` to remove those too, which leaves no trace of cckit in the repo. **This machine's registration** (`~/.config/cckit/identity.json`) is never touched, because registering again would use one of the five device slots each e-mail has; delete that file by hand only if you really want to forget it. Teammates need do nothing except `git pull`: the hooks are gone with the files.
+**If something goes wrong**
+- *`requires a different Python`*: the environment was made with an old Python. Delete `~/.cckit-venv` and create it again with a newer one, e.g. `python3.12 -m venv ~/.cckit-venv` (Windows: `py -3.12 -m venv ...`).
+- *`cckit` is "not found"*: open a new terminal, or run `~/.cckit-venv/bin/cckit` (Windows: `...\Scripts\cckit.exe`).
+- *pip fails with a git error*: git is missing, or github.com is not reachable.
+- *Windows hooks do nothing*: set `python = "python"` under `[hooks]` in `.cckit/cckit.toml`, then run `cckit init`.
+- `cckit doctor` checks a repo and says what to fix.
 
-### In a repo: install again, or start fresh
-
-```bash
-cckit install               # the same as `cckit init`: creates everything again from .cckit/cckit.toml
-cckit reinstall             # uninstall + install in one step: for a repo where something got broken or edited by hand
-cckit reinstall --purge     # a completely fresh start: also resets .cckit/cckit.toml (and removes the key and the log)
-```
-
-`reinstall` replaces generated files even if you edited them (the list it shows first says which), and keeps your settings and key unless you add `--purge`. It asks before it changes anything.
-
-### On a machine: remove or reinstall the program
-
-Repos keep working without cckit installed, so this never breaks a project. Linux / macOS:
-
-```bash
-rm -rf ~/.cckit-venv ~/.local/bin/cckit              # the program (and the link made in the install steps)
-rm -f ~/.config/cckit/identity.json                   # optional: forget who this machine is registered as
-# fresh install: repeat the Ubuntu install steps above
-```
-
-Windows (PowerShell):
-
-```powershell
-Remove-Item -Recurse -Force "$env:USERPROFILE\.cckit-venv"          # the program
-Remove-Item -Force "$env:APPDATA\cckit\identity.json"              # optional: forget who this machine is registered as
-# fresh install: repeat the Windows install steps above (and remove the \.cckit-venv\Scripts entry from your PATH if you added one)
-```
-
-If you only want a new version, upgrading is enough; see [Upgrading](#upgrading).
+Everything cckit owns lives in `.cckit/` (`cckit.toml` settings, `key.json` optional team key, `hooks/`, `scripts/`, the local usage log); `.claude/` only holds what Claude Code itself requires.
 
 ## What it generates
 
@@ -279,7 +158,7 @@ to a small app you deploy yourself (it must be reachable without a login, becaus
 
 ```
 cckit init [path] [--dry-run] [--force]    create/update files; --force replaces values you changed (`cckit install` is the same)
-cckit uninstall [path] [--purge] [--dry-run] [--yes] [--force]   take cckit out of the repo again (see Uninstall and reinstall)
+cckit uninstall [path] [--purge] [--dry-run] [--yes] [--force]   take cckit out of the repo again (see Uninstall or start fresh)
 cckit reinstall [path] [--purge] [--yes]   a fresh install: uninstall, then init
 cckit doctor [path]                        verify the repo; exit code 1 on failures
 cckit print-settings [path]                show the settings.json content cckit manages
