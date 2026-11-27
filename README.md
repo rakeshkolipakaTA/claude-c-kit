@@ -5,6 +5,8 @@ the repo gets the same cheap, safe defaults without setting anything up by hand.
 
 **Who does what.** The **team lead** installs cckit once, sets a repo up, and commits the result. **Everyone else just runs `git pull`**: they do not install or run anything. Upgrading and uninstalling are the lead's job too. All commands are listed in [Commands](#commands).
 
+New here? The step-by-step version is the [developer guide](docs/cckit-developer-guide.md).
+
 ## Quick start (team lead)
 
 You need Python 3.10+ and git. Install cckit once on your machine, in its own virtual environment so it never touches your other Python packages.

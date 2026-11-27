@@ -1,0 +1,134 @@
+<!doctype html><html><head><meta charset='utf-8'><title>Claude Cost Kit (cckit) developer guide</title><style>
+@page { size: A4; margin: 18mm 16mm; }
+body { font: 10.5pt/1.5 "Helvetica Neue", Helvetica, Arial, "DejaVu Sans", sans-serif; color:#1f2328; }
+h1 { font-size: 22pt; margin: 0 0 8pt; padding-bottom: 6pt; border-bottom: 2px solid #0b5cad; }
+h2 { font-size: 14pt; margin: 18pt 0 6pt; color:#0b5cad; break-after: avoid; }
+h3 { font-size: 11.5pt; margin: 12pt 0 4pt; break-after: avoid; }
+p, li { orphans: 3; widows: 3; }
+code { font: 9pt "DejaVu Sans Mono", Consolas, monospace; background:#eef1f5; padding:1px 4px; border-radius:3px; }
+pre { background:#f3f5f8; border:1px solid #d8dee4; border-radius:5px; padding:8px 10px; white-space:pre-wrap; word-break:break-word; break-inside: avoid; }
+pre code { background:none; padding:0; }
+table { border-collapse: collapse; width:100%; margin:8pt 0; font-size:9.5pt; }
+th, td { border:1px solid #d0d7de; padding:4px 7px; vertical-align:top; text-align:left; }
+th { background:#eaf1fa; } tr { break-inside: avoid; }
+img { max-width:100%; border:1px solid #d0d7de; border-radius:4px; margin:6pt 0; break-inside: avoid; }
+body { max-width: 900px; margin: 0 auto; }
+@media print { body { max-width: none; } }
+a { color:#0b5cad; text-decoration:none; }
+</style></head><body><h1>Claude Cost Kit (cckit) developer guide</h1>
+<p>cckit writes cheap, safe Claude Code settings into your repository, so everyone who opens it gets the same defaults without setting anything up. <strong>The team lead installs it and sets up the repo once and commits the result. Everyone else runs <code>git pull</code>.</strong></p>
+<p><strong>You need:</strong> Git, Python 3.10+ and Claude Code, signed in.</p>
+<h2>Team lead: set up a repo (once)</h2>
+<h3>Step 1. Install cckit (once per machine)</h3>
+<pre><code class="language-bash">python3 -m venv ~/.cckit-venv
+~/.cckit-venv/bin/pip install &quot;git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@main&quot;
+mkdir -p ~/.local/bin &amp;&amp; ln -sf ~/.cckit-venv/bin/cckit ~/.local/bin/cckit
+cckit --version
+</code></pre>
+<p>Windows PowerShell lines: README.</p>
+<h3>Step 2. Set your company e-mail in git</h3>
+<pre><code class="language-bash">git config user.email firstname.lastname@tigeranalytics.com
+</code></pre>
+<p>cckit takes your e-mail from here and never asks for it.</p>
+<h3>Step 3. Preview, then set up the repo</h3>
+<pre><code class="language-bash">cd your-repo
+cckit init --dry-run      # shows what would change, writes nothing
+cckit init
+</code></pre>
+<p><code>init</code> adds:
+- <code>.claude/settings.json</code>: Sonnet with high effort, limits on subagents, shorter test output, a status line (<code>[Model] ctx 42% $0.31</code>),
+- <code>CLAUDE.md</code>: one short block between <code>cckit:begin</code> and <code>cckit:end</code> markers. <strong>Your own text is never touched.</strong>
+- <code>.claude/agents/</code> (cheap read-only helpers) and <code>.claude/rules/</code> (starter coding, git and language rules),
+- <code>.cckit/</code>: the settings file <code>cckit.toml</code>, the hooks and the scripts.</p>
+<p>The first time, it asks for the <strong>team key</strong> (a join code from your admin). Skip it if usage reporting is off in your team. Saving the key in <code>.cckit/key.json</code> lets teammates register automatically: say yes <strong>for a private repo only</strong>.</p>
+<h3>Step 4. Check it</h3>
+<pre><code class="language-bash">cckit doctor              # says what to fix; every line should pass
+</code></pre>
+<h3>Step 5. Commit and push</h3>
+<pre><code class="language-bash">git checkout -b add-cckit
+git add CLAUDE.md .claude .cckit
+git commit -m &quot;Add cckit&quot;
+git push -u origin add-cckit
+</code></pre>
+<p>Open a pull request and merge it. Then tell the team to <code>git pull</code>.</p>
+<h2>Everyone else</h2>
+<ol>
+<li><code>git pull</code>.</li>
+<li>Set your company e-mail in git (Step 2 above), so reporting knows who you are.</li>
+<li>Open Claude Code in the repo and <strong>accept the "trust this folder" prompt</strong>. Without it the repo settings do not apply.</li>
+</ol>
+<p>Nothing to install except Python 3 on the PATH (the hooks are small Python files). The first session registers you for usage reporting and shows one line saying so.</p>
+<h2>Day to day</h2>
+<ul>
+<li>Work as usual. At about 60% context run <code>/compact</code>, and <code>/clear</code> between unrelated tasks.</li>
+<li>Check your own usage: <code>cckit report --days 7</code>. It shows numbers only, read from your local sessions.</li>
+<li>Start Claude Code with only the tools a task needs: <code>cckit run --profile NAME</code>, with a profile your lead defined in <code>.cckit/cckit.toml</code>. <code>--profile none</code> starts with no MCP servers.</li>
+<li>The rule files are <strong>starters</strong>. Edit them to your team's standards and commit them; once you edit a file, <code>cckit init</code> never overwrites it.</li>
+<li>Keep <code>CLAUDE.md</code> and each rules file under 200 lines (<code>cckit doctor</code> fails above that). Put detail in <code>.claude/rules/</code> or a skill.</li>
+</ul>
+<h2>Privacy</h2>
+<p>Usage reporting sends numbers and tool <strong>names</strong> only. It never sends prompts, code or replies. Switch it off on your machine with <code>CCKIT_TELEMETRY=off</code>. <code>CCKIT_DISABLED=1</code> makes every cckit hook do nothing.</p>
+<h2>Best practices</h2>
+<ul>
+<li><strong>Commit the generated files</strong> (<code>CLAUDE.md</code>, <code>.claude</code>, <code>.cckit</code>) in a pull request, so everyone gets the same settings.</li>
+<li><strong>Keep the team key out of public repos.</strong> <code>.cckit/key.json</code> is for private repos only; otherwise add it to <code>.gitignore</code> and give people the key.</li>
+<li><strong>Upgrade as the lead, in a pull request.</strong> Re-install from <code>main</code>, run <code>cckit init</code>, commit the diff; everyone else <code>git pull</code>s. That keeps the team on one version.</li>
+<li><strong>A developer's own settings can override the repo's.</strong> Only managed settings are enforced, and spend limits live in the admin console, not in the repo.</li>
+<li><strong>Review a changed rule file like code.</strong> It steers Claude for the whole team.</li>
+</ul>
+<h2>Upgrade, switch off, start over (team lead)</h2>
+<pre><code class="language-bash">~/.cckit-venv/bin/pip install --upgrade &quot;git+https://github.com/rakeshkolipakaTA/claude-c-kit.git@main&quot;
+cckit init                  # then commit the changes
+
+cckit disable               # off for this repo, keeps your settings; cckit enable brings it back
+cckit uninstall             # lists what it will remove, asks first
+cckit reinstall             # uninstall, then install again
+</code></pre>
+<h2>If something goes wrong</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>requires a different Python</code></td>
+<td>Delete <code>~/.cckit-venv</code> and recreate it with Python 3.10+ (<code>python3.12 -m venv ~/.cckit-venv</code>)</td>
+</tr>
+<tr>
+<td><code>cckit</code> not found</td>
+<td>Open a new terminal, or run <code>~/.cckit-venv/bin/cckit</code></td>
+</tr>
+<tr>
+<td>pip fails with a git error</td>
+<td>Git is missing, or github.com is not reachable</td>
+</tr>
+<tr>
+<td>Settings seem ignored</td>
+<td>Restart Claude Code and accept the folder-trust prompt</td>
+</tr>
+<tr>
+<td><code>cckit init</code> stops with a marker message</td>
+<td><code>CLAUDE.md</code> has a <code>cckit:begin</code> without <code>cckit:end</code> (or reversed). Fix the marker; nothing was written</td>
+</tr>
+<tr>
+<td>"No company e-mail" note at start-up</td>
+<td><code>git config user.email firstname.lastname@tigeranalytics.com</code></td>
+</tr>
+<tr>
+<td>Not registered, nothing reported</td>
+<td><code>cckit register</code>, or set <code>CCKIT_TEAM_KEY</code>; check with <code>cckit whoami --check</code></td>
+</tr>
+<tr>
+<td>Windows hooks do nothing</td>
+<td>Set <code>python = "python"</code> under <code>[hooks]</code> in <code>.cckit/cckit.toml</code>, then <code>cckit init</code></td>
+</tr>
+<tr>
+<td>Anything else</td>
+<td><code>cckit doctor</code>, then <code>cckit reinstall</code></td>
+</tr>
+</tbody>
+</table>
+<p>Every command and setting: the README.</p></body></html>
